@@ -1206,6 +1206,7 @@ trace_printf(const char *fmt, ...)
 	va_start(va, fmt);
 	vfprintf(tracefile, fmt, va);
 	va_end(va);
+	fflush(tracefile);
 }
 
 static void
@@ -10261,7 +10262,7 @@ evalpipe(union node *n, int flags)
 	int pip[2];
 	int status = 0;
 
-	TRACE(("evalpipe(0x%lx) called\n", (long)n));
+	TRACE(("evalpipe(0x%p) called\n", (n)));
 	pipelen = 0;
 	for (lp = n->npipe.cmdlist; lp; lp = lp->next)
 		pipelen++;
@@ -15713,6 +15714,7 @@ spawn_forkshell(struct forkshell *fs, struct job *jp, union node *n, int mode)
 	char buf[32];
 	const char *argv[] = { "sh", "--fs", NULL, NULL };
 	intptr_t ret;
+	HANDLE hCurrentProcess;
 
 	new = forkshell_prepare(fs);
 	if (new == NULL)
@@ -15723,6 +15725,13 @@ spawn_forkshell(struct forkshell *fs, struct job *jp, union node *n, int mode)
 	sprintf(buf, "%p", new->hMapFile);
 	argv[2] = buf;
 	ret = spawnve(P_NOWAIT, bb_busybox_exec_path, (char *const *)argv, environ);
+	if (ret != -1) {
+		hCurrentProcess = GetCurrentProcess();
+		if (!DuplicateHandle(hCurrentProcess, (HANDLE)ret, hCurrentProcess,
+				(HANDLE*)&ret, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			ret = -1;
+		}
+	}
 	CloseHandle(new->hMapFile);
 	UnmapViewOfFile(new);
 	if (ret == -1) {
