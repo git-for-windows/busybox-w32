@@ -24,7 +24,7 @@ jobs:
       shell: bash
       run: make -j$(nproc) busybox.exe
     - name: upload busybox artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: busybox
         path: busybox.exe
