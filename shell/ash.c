@@ -12495,18 +12495,159 @@ evalcommand(union node *cmd, int flags)
 		 */
 #if ENABLE_PLATFORM_MINGW32
 		if (!(flags & EV_EXIT) || may_have_traps IF_SUW32(|| delayexit)) {
-			/* No, forking off a child is necessary */
-			struct forkshell fs;
+			/*
+			 * Fast path: for a plain synchronous external command,
+			 * spawn the target directly and skip `spawn_forkshell`.
+			 * The shell-state replication that `spawn_forkshell`
+			 * does (serialize jobtab, redirs, variables, function
+			 * tree into a `CreateFileMapping` shared-memory block
+			 * and re-exec `busybox.exe` so the child can restore
+			 * it) is only needed for `evalpipe`, `evalsubshell`,
+			 * `evalbackcmd` and heredoc setup, where the child
+			 * re-enters the shell's evaluator.  A regular external
+			 * command never re-enters the evaluator, so the entire
+			 * apparatus is pure overhead: one extra `CreateProcess`
+			 * per spawn plus the serialize/deserialize cost.
+			 *
+			 * Unlike Cygwin bash (see the failed PR
+			 * git-for-windows/MSYS2-packages#288), BB-w32 has no
+			 * POSIX job-control or signal-handler state that would
+			 * have to be replicated between fork and exec.  Traps
+			 * are safe here because they only fire in the parent
+			 * after `waitforjob`, exactly as with the forkshell
+			 * fallback: the forkshell child would clear its own
+			 * traps before `exec` anyway (see `clear_traps` in
+			 * `forkshell_init`); the parent's traps run after
+			 * wait in either path.
+			 */
+			IF_SUW32(if (!delayexit))
+			{
+				char **envp;
+				intptr_t spawn_ret;
+				HANDLE proc;
+				int idx;
 
-			INTOFF;
-			memset(&fs, 0, sizeof(fs));
-			fs.fpid = FS_SHELLEXEC;
-			fs.argv = argv;
-			fs.path = (char*)path;
-			fs.fd[0] = cmdentry.u.index;
-			jp = makejob(/*cmd,*/ 1);
-			spawn_forkshell(&fs, jp, cmd, FORK_FG);
-			break;
+				INTOFF;
+				/*
+				 * Pass envp explicitly.  `mingw_spawn_proc`
+				 * (i.e. `mingw_spawnvp`) hard-codes envp=NULL
+				 * down to `_wspawnve`, which under UCRT
+				 * inherits the parent's PEB env block and
+				 * therefore ignores any exports or
+				 * `VAR=val cmd` temporaries the shell has
+				 * assigned.
+				 *
+				 * Resolve `argv[0]` against the shell's PATH
+				 * (`path` / `cmdentry.u.index`) rather than
+				 * letting `mingw_spawn_proc*` re-resolve via
+				 * `getenv("PATH")`.  The shell keeps `PATH`
+				 * in its own vartab and does NOT reflect
+				 * shell-side `export PATH=...` into the
+				 * process environment (see `is_bb_var` in
+				 * ash.c); the two PATHs routinely diverge.
+				 * Handing the spawner a pre-resolved
+				 * absolute path avoids running the wrong
+				 * `git.exe` (a shell PATH prepending
+				 * `bin-wrappers` would silently be ignored)
+				 * and avoids losing our fast-path win when
+				 * the target is only in the shell's PATH.
+				 *
+				 * `find_command` (called just above) encodes
+				 * an applet as `u.index < -1` (via
+				 * `-2 - applet_no`) and an external as
+				 * `u.index >= 0` (its position in the shell
+				 * PATH).  Applets go to
+				 * `mingw_spawn_applet` (which spawns
+				 * `bb_busybox_exec_path` -- no PATH lookup);
+				 * externals get resolved here via
+				 * `padvance`, mirroring what `shellexec`
+				 * does inside the forkshell fallback.
+				 */
+				envp = listvars(VEXPORT, VUNSET, varlist.list,
+						/*end:*/ NULL);
+				jp = makejob(/*cmd,*/ 1);
+				idx = cmdentry.u.index;
+				if (idx < -1) {
+					/* applet: mingw_spawn_applet spawns
+					 * `bb_busybox_exec_path` with argv;
+					 * no PATH lookup needed. */
+					spawn_ret = mingw_spawn_applet(
+						P_NOWAIT,
+						(char *const *)argv, envp);
+				} else if (idx >= 0) {
+					/* external: walk shell PATH to the
+					 * entry find_command settled on and
+					 * hand the resolved absolute path to
+					 * the spawner. */
+					const char *walk = path;
+					char *resolved = NULL;
+					while (padvance(&walk, argv[0]) >= 0) {
+						if (idx-- == 0) {
+							resolved = stackblock();
+							break;
+						}
+					}
+					spawn_ret = resolved
+						? mingw_spawn_interpreter(
+							P_NOWAIT, resolved,
+							(char *const *)argv,
+							envp, 0)
+						: -1;
+				} else {
+					/* idx == -1: name has a slash;
+					 * spawn as-is via the interpreter
+					 * path. */
+					spawn_ret = mingw_spawn_interpreter(
+						P_NOWAIT, argv[0],
+						(char *const *)argv, envp, 0);
+				}
+				if (spawn_ret != -1) {
+					HANDLE self = GetCurrentProcess();
+					BOOL duplicated;
+
+					duplicated = DuplicateHandle(
+							self,
+							(HANDLE)spawn_ret,
+							self, &proc, 0, TRUE,
+							DUPLICATE_SAME_ACCESS);
+					if (duplicated) {
+						forkparent(jp, cmd,
+							FORK_FG, proc);
+						break; /* wait below */
+					}
+					/* DuplicateHandle failed: close the
+					 * pending child handle so we don't
+					 * leak, and don't retry via the
+					 * forkshell fallback (that would run
+					 * the command a SECOND time). */
+					CloseHandle((HANDLE)spawn_ret);
+					freejob(jp);
+					jp = NULL;
+					INTON;
+					ash_msg_and_raise_error(
+						"cannot duplicate "
+						"process handle");
+				}
+				/* Spawn failed; fall through to forkshell. */
+				freejob(jp);
+				jp = NULL;
+				INTON;
+			}
+
+			/* Fallback: original forkshell-based path. */
+			{
+				struct forkshell fs;
+
+				INTOFF;
+				memset(&fs, 0, sizeof(fs));
+				fs.fpid = FS_SHELLEXEC;
+				fs.argv = argv;
+				fs.path = (char*)path;
+				fs.fd[0] = cmdentry.u.index;
+				jp = makejob(/*cmd,*/ 1);
+				spawn_forkshell(&fs, jp, cmd, FORK_FG);
+				break;
+			}
 		}
 #else
 		if (!(flags & EV_EXIT) || may_have_traps) {
