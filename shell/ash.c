@@ -11334,6 +11334,49 @@ expredir(union node *n)
 	}
 }
 
+#if ENABLE_PLATFORM_MINGW32
+static intptr_t
+mingw_spawn_shell_command(char **argv, const char *path, int idx, char **envp)
+{
+	if (idx < -1) {
+		/* Only in-process which receives the "Which" marker. */
+		if (strcmp(argv[0], "which") == 0)
+			return -1;
+		return mingw_spawn_applet(P_NOWAIT,
+				(char *const *)argv, envp);
+	}
+	if (idx >= 0) {
+		const char *walk = path;
+		char *resolved = NULL;
+
+		while (padvance(&walk, argv[0]) >= 0) {
+			if (idx-- == 0) {
+				resolved = stackblock();
+				/* Match find_command()'s suffix lookup. */
+				add_win32_extension(resolved);
+				break;
+			}
+		}
+		return resolved
+			? mingw_spawn_interpreter(P_NOWAIT, resolved,
+					(char *const *)argv, envp, 0)
+			: -1;
+	}
+
+	/* idx == -1: the command name contains a slash. */
+	{
+		char *resolved = alloc_ext_space(argv[0]);
+		intptr_t ret;
+
+		add_win32_extension(resolved);
+		ret = mingw_spawn_interpreter(P_NOWAIT, resolved,
+				(char *const *)argv, envp, 0);
+		free(resolved);
+		return ret;
+	}
+}
+#endif
+
 /*
  * Evaluate a pipeline.  All the processes in the pipeline are children
  * of the process creating the pipeline.  (This differs from some versions
@@ -12533,18 +12576,74 @@ evalcommand(union node *cmd, int flags)
 		 */
 #if ENABLE_PLATFORM_MINGW32
 		if (!(flags & EV_EXIT) || may_have_traps IF_SUW32(|| delayexit)) {
-			/* No, forking off a child is necessary */
-			struct forkshell fs;
+			/* Start eligible commands without another evaluator.
+			 * The parent still handles jobs, waits, and traps. */
+			IF_SUW32(if (!delayexit))
+			{
+				char **envp;
+				intptr_t spawn_ret;
+				HANDLE proc;
+				int idx;
 
-			INTOFF;
-			memset(&fs, 0, sizeof(fs));
-			fs.fpid = FS_SHELLEXEC;
-			fs.argv = argv;
-			fs.path = (char*)path;
-			fs.fd[0] = cmdentry.u.index;
-			jp = makejob(/*cmd,*/ 1);
-			spawn_forkshell(&fs, jp, cmd, FORK_FG);
-			break;
+				INTOFF;
+				/* The shell's exports, assignments, and PATH
+				 * need not match the process environment. */
+				envp = listvars(VEXPORT, VUNSET, varlist.list,
+						/*end:*/ NULL);
+				jp = makejob(/*cmd,*/ 1);
+				idx = cmdentry.u.index;
+				spawn_ret = mingw_spawn_shell_command(argv,
+						path, idx, envp);
+				if (spawn_ret == 0) {
+					freejob(jp);
+					jp = NULL;
+					exitstatus = 0;
+					INTON;
+					break;
+				}
+				if (spawn_ret != -1) {
+					HANDLE self = GetCurrentProcess();
+					BOOL duplicated;
+
+					duplicated = DuplicateHandle(
+							self,
+							(HANDLE)spawn_ret,
+							self, &proc, 0, TRUE,
+							DUPLICATE_SAME_ACCESS);
+					if (duplicated) {
+						forkparent(jp, cmd,
+							FORK_FG, proc);
+						break; /* wait below */
+					}
+					/* Never retry a started child. */
+					CloseHandle((HANDLE)spawn_ret);
+					freejob(jp);
+					jp = NULL;
+					INTON;
+					ash_msg_and_raise_error(
+						"cannot duplicate "
+						"process handle");
+				}
+				/* Spawn failed; fall through to forkshell. */
+				freejob(jp);
+				jp = NULL;
+				INTON;
+			}
+
+			/* Fallback: original forkshell-based path. */
+			{
+				struct forkshell fs;
+
+				INTOFF;
+				memset(&fs, 0, sizeof(fs));
+				fs.fpid = FS_SHELLEXEC;
+				fs.argv = argv;
+				fs.path = (char*)path;
+				fs.fd[0] = cmdentry.u.index;
+				jp = makejob(/*cmd,*/ 1);
+				spawn_forkshell(&fs, jp, cmd, FORK_FG);
+				break;
+			}
 		}
 #else
 		if (!(flags & EV_EXIT) || may_have_traps) {

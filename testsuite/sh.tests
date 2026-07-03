@@ -122,16 +122,48 @@ testing "sh restores a redirected script fd" \
 	"\n" "" ""
 rm -f redir-script file
 
-optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
-	FEATURE_CATN
-testing "sh keeps stdin usable after NOFORK cat -n" \
-	"printf 'one\\ntwo\\n' | \
-	\"\$bindir/busybox.exe\" ash -c 'cat -n; cat; echo status=\$?'" \
-"\
-     1	one
-     2	two
-status=0
-" "" ""
+cat >suffix-script.sh <<'EOF'
+mode=$1
+PATH="$PWD/suffix-bin:$PATH"
+for command in busybox-suffix ./suffix-bin/busybox-suffix \
+	"$PWD/suffix-bin/busybox-suffix"; do
+	set -- "$command" ash -c 'test "$PPID" = "$1" && echo direct' child "$$"
+	case "$mode" in
+	simple)
+		"$@"
+		:
+		;;
+	pipeline)
+		"$@" | cat
+		;;
+	substitution)
+		output=$("$@")
+		printf '%s\n' "$output"
+		;;
+	esac
+done
+EOF
+optional PLATFORM_MINGW32 ASH ASH_TEST ASH_ECHO ASH_PRINTF
+testing "sh finds a directly spawned simple command's .exe suffix" \
+	"mkdir suffix-bin && \
+	cp \"\$bindir/busybox.exe\" suffix-bin/busybox-suffix.exe && \
+	\"\$bindir/busybox.exe\" ash suffix-script.sh simple" \
+	"direct\ndirect\ndirect\n" "" ""
+rm -rf suffix-bin suffix-script.sh
+
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK WHICH
+testing "sh keeps which's standalone-shell context as a simple command" \
+	"\"\$bindir/busybox.exe\" ash -c 'which /bin/cat; true'" \
+	"cat\n" "" ""
+
+optional PLATFORM_MINGW32 ASH ASH_ECHO
+testing "sh continues after an empty batch file" \
+	": >empty-batch-pr17.bat; \
+	\"\$bindir/busybox.exe\" ash -c \
+	'./empty-batch-pr17.bat; echo status=\$?; echo survived'; \
+	rm -f empty-batch-pr17.bat" \
+	"status=0\nsurvived\n" "" ""
+
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
 	EXPR EXPR_MATH_SUPPORT_64
 testing "sh survives NOFORK expr division overflow" \
@@ -146,6 +178,16 @@ testing "sh survives NOFORK expr remainder overflow" \
 	echo status=\$?; echo survived'" \
 	"0\nstatus=1\nsurvived\n" "" ""
 
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
+	FEATURE_CATN
+testing "sh keeps stdin usable after NOFORK cat -n" \
+	"printf 'one\\ntwo\\n' | \
+	\"\$bindir/busybox.exe\" ash -c 'cat -n; cat; echo status=\$?'" \
+"\
+     1	one
+     2	two
+status=0
+" "" ""
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
 	FEATURE_CATN
 testing "sh reports cat -n write failures under NOFORK" \

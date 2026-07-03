@@ -849,7 +849,7 @@ create_detached_process(const char *prog, char *const *argv)
 # define SPAWNVEQ(m, p, a, e) spawnveq(m, p, a, e)
 #endif
 
-static intptr_t
+intptr_t FAST_FUNC
 mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 			char *const *envp, int level)
 {
