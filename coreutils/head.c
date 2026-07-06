@@ -18,7 +18,7 @@
 //config:	default y
 //config:	depends on HEAD
 
-//applet:IF_HEAD(APPLET_NOEXEC(head, head, BB_DIR_USR_BIN, BB_SUID_DROP, head))
+//applet:IF_HEAD(APPLET_NOFORK(head, head, BB_DIR_USR_BIN, BB_SUID_DROP, head))
 
 //kbuild:lib-$(CONFIG_HEAD) += head.o
 
@@ -268,5 +268,6 @@ int head_main(int argc, char **argv)
 		fmt = header_fmt_str;
 	} while (*++argv);
 
-	fflush_stdout_and_exit(retval);
+	fflush_all();
+	return retval;
 }
