@@ -18,7 +18,7 @@
 //config:	default y
 //config:	depends on HEAD
 
-//applet:IF_HEAD(APPLET_NOEXEC(head, head, BB_DIR_USR_BIN, BB_SUID_DROP, head))
+//applet:IF_HEAD(APPLET_NOFORK(head, head, BB_DIR_USR_BIN, BB_SUID_DROP, head))
 
 //kbuild:lib-$(CONFIG_HEAD) += head.o
 
@@ -49,7 +49,48 @@
 
 #include "libbb.h"
 
-/* This is a NOEXEC applet. Be very careful! */
+/* This is a NOFORK applet. Be very careful! */
+
+static struct globals {
+	FILE *fp;
+	FILE *stdin_fp;
+#if ENABLE_FEATURE_FANCY_HEAD
+	unsigned char *bytes;
+	char **lines;
+	unsigned num_lines;
+#endif
+	void (*next_die_func)(void);
+} G;
+
+#if ENABLE_FEATURE_FANCY_HEAD
+static void head_free_buffers(void)
+{
+	unsigned i;
+
+	if (G.lines) {
+		for (i = 0; i < G.num_lines; i++)
+			free(G.lines[i]);
+		free(G.lines);
+		G.lines = NULL;
+	}
+	free(G.bytes);
+	G.bytes = NULL;
+}
+#endif
+
+static void head_cleanup_and_die(void)
+{
+#if ENABLE_FEATURE_FANCY_HEAD
+	head_free_buffers();
+#endif
+	if (G.fp && G.fp != stdin && G.fp != G.stdin_fp)
+		fclose(G.fp);
+	if (G.stdin_fp)
+		fclose(G.stdin_fp);
+	G.fp = G.stdin_fp = NULL;
+	if (G.next_die_func)
+		G.next_die_func();
+}
 
 #if !ENABLE_FEATURE_FANCY_HEAD
 # define print_first_N(fp,count,bytes) print_first_N(fp,count)
@@ -60,7 +101,7 @@ print_first_N(FILE *fp, unsigned long count, bool count_bytes)
 #if !ENABLE_FEATURE_FANCY_HEAD
 	const int count_bytes = 0;
 #endif
-	while (count) {
+	while (count && !bb_nofork_signal) {
 		int c = getc(fp);
 		if (c == EOF)
 			break;
@@ -74,9 +115,9 @@ print_first_N(FILE *fp, unsigned long count, bool count_bytes)
 static void
 print_except_N_last_bytes(FILE *fp, unsigned count)
 {
-	unsigned char *circle = xmalloc(++count);
+	unsigned char *circle = G.bytes = xmalloc(++count);
 	unsigned head = 0;
-	for (;;) {
+	while (!bb_nofork_signal) {
 		int c;
 		c = getc(fp);
 		if (c == EOF)
@@ -85,7 +126,7 @@ print_except_N_last_bytes(FILE *fp, unsigned count)
 		if (head == count)
 			break;
 	}
-	for (;;) {
+	while (!bb_nofork_signal) {
 		int c;
 		if (head == count)
 			head = 0;
@@ -97,15 +138,17 @@ print_except_N_last_bytes(FILE *fp, unsigned count)
 		head++;
 	}
  ret:
-	free(circle);
+	head_free_buffers();
 }
 
 static void
 print_except_N_last_lines(FILE *fp, unsigned count)
 {
-	char **circle = xzalloc((++count) * sizeof(circle[0]));
+	char **circle = G.lines = xzalloc((++count) * sizeof(circle[0]));
 	unsigned head = 0;
-	for (;;) {
+
+	G.num_lines = count;
+	while (!bb_nofork_signal) {
 		char *c;
 		c = xmalloc_fgets(fp);
 		if (!c)
@@ -114,7 +157,7 @@ print_except_N_last_lines(FILE *fp, unsigned count)
 		if (head == count)
 			break;
 	}
-	for (;;) {
+	while (!bb_nofork_signal) {
 		char *c;
 		if (head == count)
 			head = 0;
@@ -126,13 +169,7 @@ print_except_N_last_lines(FILE *fp, unsigned count)
 		circle[head++] = c;
 	}
  ret:
-	head = 0;
-	for (;;) {
-		free(circle[head++]);
-		if (head == count)
-			break;
-	}
-	free(circle);
+	head_free_buffers();
 }
 #else
 /* Must never be called */
@@ -178,7 +215,9 @@ int head_main(int argc, char **argv)
 # define negative_N        0
 #endif
 	FILE *fp;
+	FILE *stdin_fp = NULL;
 	const char *fmt;
+	const char *name;
 	char *p;
 	int opt;
 	int retval = EXIT_SUCCESS;
@@ -224,7 +263,7 @@ int head_main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 	if (!*argv)
-		*--argv = (char*)"-";
+		argv = (char **)&bb_argv_dash;
 
 	fmt = header_fmt_str + 1;
 	if (argc <= header_threshhold) {
@@ -239,14 +278,40 @@ int head_main(int argc, char **argv)
 			bb_error_msg("count is too big: %lu", count);
 	}
 
+	memset(&G, 0, sizeof(G));
+	G.next_die_func = die_func;
+	die_func = head_cleanup_and_die;
+
 	do {
-		fp = fopen_or_warn_stdin(*argv);
+		if (bb_nofork_signal) {
+			retval = EXIT_FAILURE;
+			break;
+		}
+		name = *argv;
+		fp = G.fp = fopen_or_warn_stdin(name);
 		if (fp) {
+			if (bb_nofork_signal)
+				goto close_input;
 			if (fp == stdin) {
-				*argv = (char *) bb_msg_standard_input;
+				if (!stdin_fp) {
+					int fd = dup(STDIN_FILENO);
+					if (fd < 0) {
+						bb_simple_perror_msg(
+							bb_msg_standard_input);
+						retval = EXIT_FAILURE;
+						goto next_file;
+					}
+					stdin_fp = G.stdin_fp = fdopen(fd, "r");
+					if (!stdin_fp) {
+						close(fd);
+						bb_die_memory_exhausted();
+					}
+				}
+				fp = stdin_fp;
+				name = bb_msg_standard_input;
 			}
 			if (header_threshhold) {
-				printf(fmt, *argv);
+				printf(fmt, name);
 			}
 			if (negative_N) {
 				if (count_bytes) {
@@ -257,16 +322,29 @@ int head_main(int argc, char **argv)
 			} else {
 				print_first_N(fp, count, count_bytes);
 			}
-			die_if_ferror_stdout();
-			if (fclose_if_not_stdin(fp)) {
-				bb_simple_perror_msg(*argv);
+ close_input:
+			if (fp != stdin_fp && fclose_if_not_stdin(fp)) {
+				if (!bb_nofork_signal)
+					bb_simple_perror_msg(name);
 				retval = EXIT_FAILURE;
 			}
 		} else {
 			retval = EXIT_FAILURE;
 		}
+ next_file:
+		G.fp = NULL;
+		if (ferror(stdout) || bb_nofork_signal)
+			break;
 		fmt = header_fmt_str;
 	} while (*++argv);
 
+	if (stdin_fp && fclose_if_not_stdin(stdin_fp)) {
+		if (!bb_nofork_signal)
+			bb_simple_perror_msg(bb_msg_standard_input);
+		retval = EXIT_FAILURE;
+	}
+	G.stdin_fp = NULL;
+	die_func = G.next_die_func;
+	die_if_ferror_stdout();
 	fflush_stdout_and_exit(retval);
 }
