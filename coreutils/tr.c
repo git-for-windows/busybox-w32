@@ -44,7 +44,7 @@
 //config:	useful for cases when no other way of expressing a character
 //config:	is possible.
 
-//applet:IF_TR(APPLET(tr, BB_DIR_USR_BIN, BB_SUID_DROP))
+//applet:IF_TR(APPLET_NOFORK(tr, tr, BB_DIR_USR_BIN, BB_SUID_DROP, tr))
 
 //kbuild:lib-$(CONFIG_TR) += tr.o
 
@@ -289,6 +289,28 @@ static int complement(char *buffer, int buffer_len)
 	return len;
 }
 
+static char *tr_str1;
+static char *tr_str2;
+static char *tr_vector;
+static void (*tr_next_die_func)(void);
+
+static void tr_free_buffers(void)
+{
+	free(tr_vector);
+	free(tr_str2);
+	free(tr_str1);
+	tr_vector = NULL;
+	tr_str2 = NULL;
+	tr_str1 = NULL;
+}
+
+static void tr_cleanup_and_die(void)
+{
+	tr_free_buffers();
+	if (tr_next_die_func)
+		tr_next_die_func();
+}
+
 int tr_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int tr_main(int argc UNUSED_PARAM, char **argv)
 {
@@ -298,13 +320,27 @@ int tr_main(int argc UNUSED_PARAM, char **argv)
 	size_t in_index, out_index;
 	unsigned last = UCHAR_MAX + 1; /* not equal to any char */
 	unsigned char coded, c;
-	char *str1 = xmalloc(TR_BUFSIZ);
-	char *str2 = xmalloc(TR_BUFSIZ);
+	char *str1;
+	char *str2;
 	int str2_length;
 	int str1_length;
-	char *vector = xzalloc(ASCII * 3);
-	char *invec  = vector + ASCII;
-	char *outvec = vector + ASCII * 2;
+	char *vector;
+	char *invec;
+	char *outvec;
+
+	tr_str1 = NULL;
+	tr_str2 = NULL;
+	tr_vector = NULL;
+	tr_next_die_func = die_func;
+	die_func = tr_cleanup_and_die;
+	tr_str1 = xmalloc(TR_BUFSIZ);
+	tr_str2 = xmalloc(TR_BUFSIZ);
+	tr_vector = xzalloc(ASCII * 3);
+	str1 = tr_str1;
+	str2 = tr_str2;
+	vector = tr_vector;
+	invec = vector + ASCII;
+	outvec = vector + ASCII * 2;
 
 #define TR_OPT_complement   (3 << 0)
 #define TR_OPT_delete       (1 << 2)
@@ -324,14 +360,16 @@ int tr_main(int argc UNUSED_PARAM, char **argv)
 	opts = getopt32(argv, "^+" "Ccds" "\0" "-1:?2");
 	argv += optind;
 
-	str1_length = expand(*argv++, &str1);
+	str1_length = expand(*argv++, &tr_str1);
+	str1 = tr_str1;
 	str2_length = 0;
 	if (opts & TR_OPT_complement)
 		str1_length = complement(str1, str1_length);
 	if (*argv) {
 		if (argv[0][0] == '\0')
 			bb_simple_error_msg_and_die("STRING2 cannot be empty");
-		str2_length = expand(*argv, &str2);
+		str2_length = expand(*argv, &tr_str2);
+		str2 = tr_str2;
 		map(vector, str1, str1_length,
 				str2, str2_length);
 	}
@@ -372,11 +410,9 @@ int tr_main(int argc UNUSED_PARAM, char **argv)
 		str2[out_index++] = last = coded;
 	}
 
-	if (ENABLE_FEATURE_CLEAN_UP) {
-		free(vector);
-		free(str2);
-		free(str1);
-	}
+	tr_free_buffers();
+	die_func = tr_next_die_func;
+	tr_next_die_func = NULL;
 
 	return EXIT_SUCCESS;
 }
