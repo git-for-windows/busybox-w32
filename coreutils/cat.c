@@ -27,7 +27,7 @@
 //config:	help
 //config:	Display nonprinting characters as escape sequences
 
-//applet:IF_CAT(APPLET(cat, BB_DIR_BIN, BB_SUID_DROP))
+//applet:IF_CAT(APPLET_NOFORK(cat, cat, BB_DIR_BIN, BB_SUID_DROP, cat))
 
 //kbuild:lib-$(CONFIG_CAT) += cat.o
 
@@ -111,6 +111,7 @@ static int catv(unsigned opts, char **argv)
 {
 	int retval = EXIT_SUCCESS;
 	int fd;
+	char read_buf[COMMON_BUFSIZE];
 #if ENABLE_FEATURE_CATN
 	bool eol_seen = (opts & (CAT_OPT_n|CAT_OPT_b));
 	unsigned eol_char = (eol_seen ? '\n' : 0x100);
@@ -127,9 +128,11 @@ static int catv(unsigned opts, char **argv)
 		flags |= VISIBLE_SHOW_TABS;
 #endif
 
-#define read_buf bb_common_bufsiz1
-	setup_common_bufsiz();
 	do {
+		if (bb_nofork_signal) {
+			retval = EXIT_FAILURE;
+			break;
+		}
 		fd = open_or_warn_stdin(*argv);
 		if (fd < 0) {
 			retval = EXIT_FAILURE;
@@ -138,6 +141,10 @@ static int catv(unsigned opts, char **argv)
 		for (;;) {
 			int i, res;
 
+			if (bb_nofork_signal) {
+				retval = EXIT_FAILURE;
+				break;
+			}
 			res = read(fd, read_buf, COMMON_BUFSIZE);
 			if (res < 0)
 				retval = EXIT_FAILURE;
@@ -155,7 +162,12 @@ static int catv(unsigned opts, char **argv)
 				fputs_stdout(buf);
 			}
 		}
-		if (ENABLE_FEATURE_CLEAN_UP && fd)
+		/* NOFORK: close unconditionally to avoid fd leak.  Upstream
+		 * gates this on ENABLE_FEATURE_CLEAN_UP (skips close because
+		 * exit() reclaims the fd), but under NOFORK the fd stays open
+		 * in the shell process, cumulatively exhausting the fd table
+		 * across many invocations. */
+		if (fd)
 			close(fd);
 	} while (*++argv);
 
@@ -207,7 +219,7 @@ int cat_main(int argc UNUSED_PARAM, char **argv)
 		exitcode = EXIT_SUCCESS;
 		do {
 			exitcode |= print_numbered_lines(&ns, *argv);
-		} while (*++argv);
+		} while (*++argv && !bb_nofork_signal);
 		fflush_stdout_and_exit(exitcode);
 	}
 	/*opts >>= 2;*/
