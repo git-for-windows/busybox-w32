@@ -46,7 +46,7 @@
 //config:	help
 //config:	Use "unsigned long long" for counter variables.
 
-//applet:IF_WC(APPLET(wc, BB_DIR_USR_BIN, BB_SUID_DROP))
+//applet:IF_WC(APPLET_NOFORK(wc, wc, BB_DIR_USR_BIN, BB_SUID_DROP, wc))
 
 //kbuild:lib-$(CONFIG_WC) += wc.o
 
@@ -148,8 +148,25 @@ int wc_main(int argc UNUSED_PARAM, char **argv)
 		unsigned linepos;
 		smallint in_word;
 
+		if (bb_nofork_signal) {
+			status = EXIT_FAILURE;
+			break;
+		}
 		++num_files;
 		fp = fopen_or_warn_stdin(arg);
+		if (fp == stdin) {
+			int fd = dup(STDIN_FILENO);
+
+			fp = fd < 0 ? NULL : fdopen(fd, "r");
+			if (!fp) {
+				int saved_errno = errno;
+
+				if (fd >= 0)
+					close(fd);
+				errno = saved_errno;
+				bb_simple_perror_msg(bb_msg_standard_input);
+			}
+		}
 		if (!fp) {
 			status = EXIT_FAILURE;
 			continue;
@@ -163,10 +180,13 @@ int wc_main(int argc UNUSED_PARAM, char **argv)
 			int c;
 			/* Our -w doesn't match GNU wc exactly... oh well */
 
+			if (bb_nofork_signal)
+				break;
 			c = getc(fp);
 			if (c == EOF) {
 				if (ferror(fp)) {
-					bb_simple_perror_msg(arg);
+					if (!bb_nofork_signal)
+						bb_simple_perror_msg(arg);
 					status = EXIT_FAILURE;
 				}
 				goto DO_EOF;  /* Treat an EOF as '\r'. */
@@ -220,6 +240,10 @@ int wc_main(int argc UNUSED_PARAM, char **argv)
 
 		fclose_if_not_stdin(fp);
 
+		if (bb_nofork_signal) {
+			status = EXIT_FAILURE;
+			break;
+		}
 		if (totals[WC_LENGTH] < counts[WC_LENGTH]) {
 			totals[WC_LENGTH] = counts[WC_LENGTH];
 		}
@@ -245,7 +269,7 @@ int wc_main(int argc UNUSED_PARAM, char **argv)
 	 * space, we set the pcounts ptr to the totals array.  This has the side
 	 * effect of trashing the totals array after outputting it, but that's
 	 * irrelavent since we no longer need it. */
-	if (num_files > 1) {
+	if (num_files > 1 && !bb_nofork_signal) {
 		num_files = 0;  /* Make sure we don't get here again. */
 		arg = "total";
 		pcounts = totals;

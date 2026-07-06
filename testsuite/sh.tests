@@ -136,6 +136,11 @@ testing "sh reports cat -v write failures under NOFORK" \
 	"\"\$bindir/busybox.exe\" ash -c \
 	'cat -v <<< hi 1>&-; echo status=\$?' 2>&1" \
 	"cat: standard output: Bad file descriptor\nstatus=1\n" "" ""
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK
+testing "sh reports wc write failures under NOFORK" \
+	"\"\$bindir/busybox.exe\" ash -c \
+	'wc -l <<< hi 1>&-; echo status=\$?' 2>&1" \
+	"wc: standard output: Bad file descriptor\nstatus=1\n" "" ""
 optional PLATFORM_MINGW32
 
 for marker in good bad; do
