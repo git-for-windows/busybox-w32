@@ -11,6 +11,12 @@ to exclude tests which are known to fail.
 Set SKIP_INTERNET_TESTS to exclude tests which require working
 internet connection.
 
+Windows sh tests compile nofork_io.c when a MinGW compiler is available.
+They use CC, or gcc with CROSS_COMPILE/the configured compiler prefix.
+The helper sends Ctrl-C only to a newly created hidden test console. It
+releases its input and output pipes on failure rather than terminating a
+test process.
+
 
 Common causes of false positives:
 

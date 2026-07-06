@@ -216,4 +216,11 @@ testing "CR in backticks is only eaten if preceding a NL" \
 	"" \
 	""
 
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
+	ASH_ECHO ASH_PRINTF ASH_TEST CAT WC HEAD TR AWK \
+	FEATURE_CATN FEATURE_CATV FEATURE_FANCY_HEAD
+if test -z "$SKIP"; then
+	. ./nofork_io.tests
+fi
+
 exit $FAILCOUNT
