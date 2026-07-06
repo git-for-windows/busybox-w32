@@ -125,6 +125,20 @@ testing "sh keeps stdin usable after NOFORK cat -n" \
 status=0
 " "" ""
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
+	EXPR EXPR_MATH_SUPPORT_64
+testing "sh survives NOFORK expr division overflow" \
+	"\"\$bindir/busybox.exe\" ash -c ' \
+	expr -9223372036854775808 / -1; \
+	echo status=\$?; echo survived' 2>&1" \
+	"expr: arithmetic overflow\nstatus=2\nsurvived\n" "" ""
+
+testing "sh survives NOFORK expr remainder overflow" \
+	"\"\$bindir/busybox.exe\" ash -c ' \
+	expr -9223372036854775808 % -1; \
+	echo status=\$?; echo survived'" \
+	"0\nstatus=1\nsurvived\n" "" ""
+
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
 	FEATURE_CATN
 testing "sh reports cat -n write failures under NOFORK" \
 	"\"\$bindir/busybox.exe\" ash -c \

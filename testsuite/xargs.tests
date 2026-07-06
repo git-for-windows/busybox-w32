@@ -67,6 +67,12 @@ testing "xargs -I skips empty lines and leading whitespace" \
 	"[2]\n[4]\n[6 6 ]\n[7]\n" \
 	"" " \n2\n\n4\n\n 6 6 \n \v \t 7\n\t\n\v\n"
 
+optional FEATURE_PREFER_APPLETS FEATURE_XARGS_SUPPORT_REPL_STR EXPR
+testing "xargs retains state after NOFORK expr" \
+	"xargs -I% expr %; echo status=\$?" \
+	"1\n2\nstatus=0\n" \
+	"" "1\n2\n"
+
 SKIP=
 
 exit $FAILCOUNT
