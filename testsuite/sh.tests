@@ -146,6 +146,28 @@ testing "sh does not inherit the process PATH when PATH is unset" \
 rm -rf interp-path-good interp-path-bad interp-path-launch interp-path-script.sh
 optional PLATFORM_MINGW32
 
+mkdir -p comspec-probe/usr/bin
+printf '#!/bin/ash\necho wrapper\n' >comspec-probe/usr/bin/cmd
+printf '#!/bin/ash\necho stale\n' >comspec-stale
+chmod +x comspec-probe/usr/bin/cmd comspec-stale
+optional PLATFORM_MINGW32 ASH FEATURE_PREFER_APPLETS ASH_ECHO
+testing "sh respects an unset COMSPEC when invoking the cmd wrapper" \
+	"COMSPEC=\"\$PWD/comspec-stale\" \"\$bindir/busybox.exe\" ash -c \
+	'unset COMSPEC; ./comspec-probe/usr/bin/cmd; :'" \
+	"wrapper\n" "" ""
+
+testing "sh respects an empty COMSPEC when invoking the cmd wrapper" \
+	"\"\$bindir/busybox.exe\" ash -c \
+	'COMSPEC=; ./comspec-probe/usr/bin/cmd; :' 2>/dev/null" \
+	"wrapper\n" "" ""
+
+testing "sh respects an empty COMSPEC when executing the cmd wrapper" \
+	"\"\$bindir/busybox.exe\" ash -c \
+	'COMSPEC=; exec ./comspec-probe/usr/bin/cmd' 2>/dev/null" \
+	"wrapper\n" "" ""
+rm -rf comspec-probe comspec-stale
+optional PLATFORM_MINGW32
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \
