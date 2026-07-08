@@ -6989,6 +6989,7 @@ tryexec(const char *cmd, const char *path, int noexec, char **argv, char **envp)
 #if ENABLE_FEATURE_SH_STANDALONE
     interp_t interp;
 #endif
+	const char *comspec;
 
 	/* Workaround for libtool, which assumes the host is an MSYS2
 	 * environment and requires special-case escaping for cmd.exe.
@@ -7000,8 +7001,19 @@ tryexec(const char *cmd, const char *path, int noexec, char **argv, char **envp)
 		argv[1]++;	/* drop extra slash */
 	}
 
-	/* cmd was allocated on the stack with room for an extension */
-	add_win32_extension((char *)cmd);
+	/*
+	 * /usr/bin/cmd is an MSYS2 Bash wrapper around COMSPEC.  Invoking
+	 * that wrapper from real Bash rewrites cmd.exe-style options such as
+	 * "/w" into MSYS paths.  Use COMSPEC directly instead.
+	 */
+	comspec = lookupvar("COMSPEC");
+	if (comspec &&
+			(is_suffixed_with_case(cmd, "/usr/bin/cmd") ||
+			 is_suffixed_with_case(cmd, "\\usr\\bin\\cmd")))
+		cmd = comspec;
+	else
+		/* cmd was allocated on the stack with room for an extension */
+		add_win32_extension((char *)cmd);
 
 # if ENABLE_FEATURE_SH_STANDALONE
 	/* If the command is a script with an interpreter which is an

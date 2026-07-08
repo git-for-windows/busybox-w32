@@ -729,6 +729,32 @@ mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 	char **new_argv;
 	char *path = NULL;
 	int is_unix_path;
+	int i;
+
+	/*
+	 * MSYS2 provides /usr/bin/cmd as a Bash wrapper around COMSPEC.
+	 * Real Bash rewrites cmd.exe-style options such as "/w" into MSYS
+	 * paths.  BusyBox used to avoid that accidentally through its
+	 * misleading bash-is-ash alias.  Invoke COMSPEC directly instead:
+	 * this is both faster and preserves cmd.exe argv semantics.
+	 */
+	if (is_msys2_cmd(prog) &&
+			strcasecmp(bb_basename(prog), "cmd") == 0) {
+		const char *comspec = NULL;
+
+		if (envp) {
+			for (i = 0; envp[i]; i++) {
+				if (_strnicmp(envp[i], "COMSPEC=", 8) == 0) {
+					comspec = envp[i] + 8;
+					break;
+				}
+			}
+		}
+		if (!comspec)
+			comspec = getenv("COMSPEC");
+		if (comspec)
+			prog = comspec;
+	}
 
 	if (!parse_interpreter(prog, &interp))
 		return SPAWNVEQ(mode, prog, argv, envp);
