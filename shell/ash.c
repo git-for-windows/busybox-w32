@@ -11375,6 +11375,401 @@ mingw_spawn_shell_command(char **argv, const char *path, int idx, char **envp)
 		return ret;
 	}
 }
+
+/*
+ * Parent-side pipeline expansion must not leak arithmetic side effects or
+ * errors. Accept only bounded decimal addition and subtraction over ordinary
+ * integer variables; everything else retains forkshell evaluation.
+ */
+static int
+pipeline_arithmetic_var_is_integer(const char *name, size_t len,
+		int require_set)
+{
+	char varname[64];
+	const unsigned char *digits;
+	const unsigned char *value;
+	struct var *vp;
+
+	if (len + 2 > sizeof(varname))
+		return 0;
+	memcpy(varname, name, len);
+	varname[len] = '=';
+	varname[len + 1] = '\0';
+
+	vp = *findvar(varname);
+	if (vp == NULL || (vp->flags & VUNSET))
+		return !require_set;
+	if (vp->flags & VDYNAMIC)
+		return 0;
+
+	value = (const unsigned char *)var_end(vp->var_text);
+	if (*value == '+' || *value == '-') {
+		if (require_set)
+			return 0;
+		value++;
+	}
+	digits = value;
+	if (!isdigit(*value))
+		return 0;
+	do {
+		value++;
+	} while (isdigit(*value));
+	return *value == '\0' &&
+		(value - digits == 1 || *digits != '0') &&
+		value - digits <= (int)sizeof(arith_t) * 2;
+}
+
+static const unsigned char *
+pipeline_arithmetic_skip_space(const unsigned char *p)
+{
+	while (isspace(*p))
+		p++;
+	return p;
+}
+
+static const unsigned char *pipeline_arithmetic_expr(
+		const unsigned char *p);
+
+static const unsigned char *
+pipeline_arithmetic_primary(const unsigned char *p)
+{
+	const unsigned char *end;
+
+	p = pipeline_arithmetic_skip_space(p);
+	if (*p == '(') {
+		p = pipeline_arithmetic_expr(p + 1);
+		if (p == NULL)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p);
+		return *p == ')' ? p + 1 : NULL;
+	}
+	if (isdigit(*p)) {
+		end = p;
+		do {
+			end++;
+		} while (isdigit(*end));
+		if ((end - p > 1 && *p == '0') ||
+				end - p > (int)sizeof(arith_t) * 2)
+			return NULL;
+		return end;
+	}
+	if (is_name(*p)) {
+		end = p + 1;
+		while (is_in_name(*end))
+			end++;
+		return pipeline_arithmetic_var_is_integer(
+				(const char *)p, end - p, 0) ? end : NULL;
+	}
+	if (*p == CTLVAR) {
+		int subtype = p[1] & VSTYPE;
+
+		p += 2;
+		end = (const unsigned char *)strchr((const char *)p, '=');
+		if (subtype != VSNORMAL || end == NULL ||
+				!pipeline_arithmetic_var_is_integer(
+					(const char *)p, end - p, 1))
+			return NULL;
+		return end + 1;
+	}
+	return NULL;
+}
+
+static const unsigned char *
+pipeline_arithmetic_factor(const unsigned char *p)
+{
+	p = pipeline_arithmetic_skip_space(p);
+	while (*p == '+' || *p == '-') {
+		if (p[1] == *p)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p + 1);
+	}
+	return pipeline_arithmetic_primary(p);
+}
+
+static const unsigned char *
+pipeline_arithmetic_expr(const unsigned char *p)
+{
+	const unsigned char *next;
+	unsigned char op;
+
+	p = pipeline_arithmetic_factor(p);
+	if (p == NULL)
+		return NULL;
+	for (;;) {
+		p = pipeline_arithmetic_skip_space(p);
+		op = *p;
+		if (op != '+' && op != '-')
+			return p;
+		if (p[1] == op)
+			return NULL;
+		next = pipeline_arithmetic_factor(p + 1);
+		if (next == NULL)
+			return NULL;
+		p = next;
+	}
+}
+
+static const unsigned char *
+pipeline_arithmetic_is_safe(const unsigned char *p)
+{
+	if (uflag)
+		return NULL;
+	p = pipeline_arithmetic_expr(p);
+	if (p == NULL)
+		return NULL;
+	p = pipeline_arithmetic_skip_space(p);
+	return *p == CTLENDARI ? p : NULL;
+}
+
+static int
+pipeline_word_is_safe_to_expand(union node *arg)
+{
+	const unsigned char *p;
+
+	if (arg->narg.backquote)
+		return 0;
+
+	for (p = (const unsigned char *)arg->narg.text; *p; p++) {
+		switch (*p) {
+		case CTLESC:
+			if (*++p == '\0')
+				return 0;
+			break;
+		case CTLQUOTEMARK:
+		case CTLENDVAR:
+			break;
+		case CTLVAR: {
+			struct var *vp;
+			int subtype = p[1] & VSTYPE;
+
+			if (uflag ||
+					(subtype != VSNORMAL &&
+					 subtype != VSLENGTH))
+				return 0;
+			vp = *findvar((const char *)p + 2);
+			if (vp && (vp->flags & VDYNAMIC))
+				return 0;
+			break;
+		}
+		case CTLARI:
+			p = pipeline_arithmetic_is_safe(p + 1);
+			if (p == NULL)
+				return 0;
+			break;
+		case CTLBACKQ:
+		case CTLENDARI:
+# if BASH_PROCESS_SUBST
+		case CTLTOPROC:
+		case CTLFROMPROC:
+# endif
+			return 0;
+		default:
+			break;
+		}
+	}
+	return 1;
+}
+
+static int
+set_fd_inherit(int fd, int inherit, DWORD *old_flags)
+{
+	HANDLE h;
+
+	if (fd < 0)
+		return 0;
+
+	h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE ||
+			!GetHandleInformation(h, old_flags) ||
+			!SetHandleInformation(h, HANDLE_FLAG_INHERIT,
+				inherit ? HANDLE_FLAG_INHERIT : 0))
+		return -1;
+	return 0;
+}
+
+static void
+restore_fd_inherit(int fd, DWORD old_flags)
+{
+	HANDLE h;
+
+	if (fd < 0)
+		return;
+	h = (HANDLE)_get_osfhandle(fd);
+	if (h != INVALID_HANDLE_VALUE)
+		SetHandleInformation(h, HANDLE_FLAG_INHERIT,
+				old_flags & HANDLE_FLAG_INHERIT);
+}
+
+static void
+restore_standard_fd(int fd, int saved)
+{
+	if (saved >= 0) {
+		dup2(saved, fd);
+		close(saved);
+	} else {
+		close(fd);
+	}
+}
+
+/*
+ * Directly spawn a simple command when expanding it in the parent cannot
+ * affect shell state: no assignments or command-local redirections, and no
+ * state-changing expansions. Leave tracing to the evaluator because PS4
+ * expansion can change shell state.
+ */
+static int
+try_spawn_pipeline_command(union node *n, struct job *jp,
+		int prevfd, int pipe_read, int pipe_write)
+{
+	struct stackmark smark;
+	struct cmdentry entry;
+	union node *arg;
+	struct arglist arglist;
+	struct strlist *sp;
+	char **argv;
+	char **envp;
+	const char *path;
+	int argc;
+	int i;
+	int saved_stdin = -1;
+	int saved_stdout = -1;
+	int stdin_swapped = 0;
+	int stdout_swapped = 0;
+	DWORD ignored_flags = 0;
+	DWORD prevfd_flags = 0;
+	DWORD pipe_read_flags = 0;
+	DWORD pipe_write_flags = 0;
+	int prevfd_marked = 0;
+	int pipe_read_marked = 0;
+	int pipe_write_marked = 0;
+	intptr_t spawn_ret = -1;
+	HANDLE proc;
+	int handled = 0;
+
+	if (xflag || n->type != NCMD || n->ncmd.assign ||
+			n->ncmd.redirect || !n->ncmd.args)
+		return 0;
+	/* Standard fds reused for pipes need the evaluator's fd handling. */
+	if ((prevfd >= 0 && prevfd <= STDOUT_FILENO) ||
+			(pipe_read >= 0 && pipe_read <= STDOUT_FILENO) ||
+			(pipe_write >= 0 && pipe_write <= STDOUT_FILENO))
+		return 0;
+
+	errlinno = lineno = n->ncmd.linno;
+
+	argc = 0;
+	for (arg = n->ncmd.args; arg; arg = arg->narg.next) {
+		if (arg->type != NARG ||
+				!pipeline_word_is_safe_to_expand(arg))
+			return 0;
+	}
+
+	setstackmark(&smark);
+	arglist.lastp = &arglist.list;
+	*arglist.lastp = NULL;
+	for (arg = n->ncmd.args; arg; arg = arg->narg.next) {
+		expandarg(arg, &arglist, EXP_FULL | EXP_TILDE);
+	}
+	for (sp = arglist.list; sp; sp = sp->next)
+		argc++;
+	argv = stalloc(sizeof(*argv) * (argc + 1));
+	i = 0;
+	for (sp = arglist.list; sp; sp = sp->next)
+		argv[i++] = sp->text;
+	argv[i] = NULL;
+
+	if (argc == 0)
+		goto out;
+
+	path = pathval();
+	find_command(argv[0], &entry, 0, path);
+	if (entry.cmdtype != CMDNORMAL)
+		goto out;
+
+	envp = listvars(VEXPORT, VUNSET, /*strlist:*/ NULL,
+			/*end:*/ NULL);
+
+	if (prevfd > 0) {
+		saved_stdin = dup(0);
+		if (saved_stdin < 0 && errno != EBADF)
+			goto restore;
+		if (saved_stdin >= 0 &&
+				set_fd_inherit(saved_stdin, 0,
+					&ignored_flags) < 0)
+			goto restore;
+		if (dup2(prevfd, 0) < 0)
+			goto restore;
+		stdin_swapped = 1;
+		if (set_fd_inherit(0, 1, &ignored_flags) < 0)
+			goto restore;
+	}
+	if (pipe_write > 1) {
+		saved_stdout = dup(1);
+		if (saved_stdout < 0 && errno != EBADF)
+			goto restore;
+		if (saved_stdout >= 0 &&
+				set_fd_inherit(saved_stdout, 0,
+					&ignored_flags) < 0)
+			goto restore;
+		if (dup2(pipe_write, 1) < 0)
+			goto restore;
+		stdout_swapped = 1;
+		if (set_fd_inherit(1, 1, &ignored_flags) < 0)
+			goto restore;
+	}
+
+	if (prevfd > 1) {
+		if (set_fd_inherit(prevfd, 0, &prevfd_flags) < 0)
+			goto restore;
+		prevfd_marked = 1;
+	}
+	if (pipe_read > 1) {
+		if (set_fd_inherit(pipe_read, 0, &pipe_read_flags) < 0)
+			goto restore;
+		pipe_read_marked = 1;
+	}
+	if (pipe_write > 1) {
+		if (set_fd_inherit(pipe_write, 0, &pipe_write_flags) < 0)
+			goto restore;
+		pipe_write_marked = 1;
+	}
+
+	spawn_ret = mingw_spawn_shell_command(argv, path,
+			entry.u.index, envp);
+
+ restore:
+	if (pipe_write_marked)
+		restore_fd_inherit(pipe_write, pipe_write_flags);
+	if (pipe_read_marked)
+		restore_fd_inherit(pipe_read, pipe_read_flags);
+	if (prevfd_marked)
+		restore_fd_inherit(prevfd, prevfd_flags);
+	if (stdout_swapped)
+		restore_standard_fd(1, saved_stdout);
+	else if (saved_stdout >= 0)
+		close(saved_stdout);
+	if (stdin_swapped)
+		restore_standard_fd(0, saved_stdin);
+	else if (saved_stdin >= 0)
+		close(saved_stdin);
+
+	if (spawn_ret != -1 && spawn_ret != 0) {
+		HANDLE self = GetCurrentProcess();
+
+		if (!DuplicateHandle(self, (HANDLE)spawn_ret, self, &proc,
+				0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			CloseHandle((HANDLE)spawn_ret);
+			ash_msg_and_raise_error(
+					"cannot duplicate process handle");
+		}
+		forkparent(jp, n, FORK_FG, proc);
+		handled = 1;
+	}
+
+ out:
+	popstackmark(&smark);
+	return handled;
+}
 #endif
 
 /*
@@ -11406,6 +11801,7 @@ evalpipe(union node *n, int flags)
 	prevfd = -1;
 	for (lp = n->npipe.cmdlist; lp; lp = lp->next) {
 		prehash(lp->n);
+		pip[0] = -1;
 		pip[1] = -1;
 		if (lp->next) {
 			if (pipe(pip) < 0) {
@@ -11414,14 +11810,19 @@ evalpipe(union node *n, int flags)
 			}
 		}
 #if ENABLE_PLATFORM_MINGW32
-		memset(&fs, 0, sizeof(fs));
-		fs.fpid = FS_EVALPIPE;
-		fs.flags = flags;
-		fs.n = lp->n;
-		fs.fd[0] = pip[0];
-		fs.fd[1] = pip[1];
-		fs.fd[2] = prevfd;
-		spawn_forkshell(&fs, jp, lp->n, n->npipe.pipe_backgnd);
+		if (n->npipe.pipe_backgnd IF_SUW32(|| delayexit) ||
+				!try_spawn_pipeline_command(lp->n, jp,
+					prevfd, pip[0], pip[1])) {
+			memset(&fs, 0, sizeof(fs));
+			fs.fpid = FS_EVALPIPE;
+			fs.flags = flags;
+			fs.n = lp->n;
+			fs.fd[0] = pip[0];
+			fs.fd[1] = pip[1];
+			fs.fd[2] = prevfd;
+			spawn_forkshell(&fs, jp, lp->n,
+					n->npipe.pipe_backgnd);
+		}
 #else
 		if (forkshell(jp, lp->n, n->npipe.pipe_backgnd) == 0) {
 			/* child */

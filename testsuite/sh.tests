@@ -122,6 +122,114 @@ testing "sh restores a redirected script fd" \
 	"\n" "" ""
 rm -f redir-script file
 
+testing "sh expands ordinary variables in pipeline commands" \
+	"value='hello world'; echo 'hello world' | grep -F \"\$value\"" \
+	"hello world\n" "" ""
+
+testing "sh expands variable lengths in pipeline commands" \
+	"value=hello; echo 5 | grep -F \"\${#value}\"" \
+	"5\n" "" ""
+
+testing "sh isolates assigning pipeline expansions" \
+	"unset value; \
+	\"\$bindir/busybox.exe\" true \"\${value:=after}\" | cat; \
+	printf '<%s>\\n' \"\${value-unset}\"" \
+	"<unset>\n" "" ""
+
+testing "sh isolates dynamic pipeline variables" \
+	"RANDOM=123; \"\$bindir/busybox.exe\" true \"\$RANDOM\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates nounset pipeline expansion errors" \
+	"sh -c 'set -u; \
+	\"\$bindir/busybox.exe\" true \"\$missing\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh expands simple pipeline arithmetic" \
+	"start=1; len=3; printf abcdef | \
+	cut -c\$((start + 1))-\$((start + \$len))" \
+	"bcd\n" "" ""
+
+cat >arithmetic-spawn-script.sh <<'EOF'
+a=1
+"$bindir/busybox.exe" ash -c '
+	test "$PPID" = "$1" || exit 1
+	shift
+	printf "%s\n" "$@"
+' child "$$" "$((a + 1))" "$(($a + 1))" "$((${a} + 1))" | cat
+EOF
+optional PLATFORM_MINGW32 ASH FEATURE_SH_MATH ASH_TEST ASH_PRINTF
+testing "sh directly spawns arithmetic variable expansions" \
+	"\"\$bindir/busybox.exe\" ash arithmetic-spawn-script.sh" \
+	"2\n2\n2\n" "" ""
+rm -f arithmetic-spawn-script.sh
+optional PLATFORM_MINGW32
+
+testing "sh isolates assigning pipeline arithmetic" \
+	"value=1; \
+	\"\$bindir/busybox.exe\" true \"\$((value += 1))\" | cat; \
+	printf '%s\\n' \"\$value\"" \
+	"1\n" "" ""
+
+testing "sh isolates dynamic pipeline arithmetic" \
+	"RANDOM=123; \
+	\"\$bindir/busybox.exe\" true \"\$((RANDOM + 1))\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates pipeline arithmetic errors" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((1 / 0))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh isolates invalid pipeline arithmetic" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((08))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+optional PLATFORM_MINGW32 ASH FEATURE_SH_MATH ASH_ECHO CAT
+testing "sh isolates signed pipeline arithmetic substitutions" \
+	"sh -c 'a=3; x=-1; \
+	\"\$bindir/busybox.exe\" true \"\$((a-\$x))\" | cat; \
+	x=+1; \"\$bindir/busybox.exe\" true \"\$((a+\$x))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+optional PLATFORM_MINGW32
+testing "sh retains tracing for simple pipeline commands" \
+	"echo 'set -x; \"\$bindir/busybox.exe\" true hello | cat' \
+		>xtrace-script.sh; \
+	trace=\$(\"\$bindir/busybox.exe\" ash xtrace-script.sh \
+		2>&1 1>/dev/null); \
+	echo \"\$trace\" | grep -F 'true hello' >/dev/null && \
+	echo \"\$trace\" | grep -F '+ cat' >/dev/null && \
+	echo traced" \
+	"traced\n" "" ""
+rm -f xtrace-script.sh
+
+cat >xtrace-state-script.sh <<'EOF'
+unset leaked
+PS4='${leaked:=changed}> '
+set -x
+"$bindir/busybox.exe" true | cat
+set +x -- "${leaked-unset}"
+printf '%s\n' "$1"
+unset leaked observed
+set -x
+output=$("$bindir/busybox.exe" true) observed=${leaked-unset}
+set +x
+printf '%s\n' "$observed"
+EOF
+optional PLATFORM_MINGW32 ASH ASH_EXPAND_PRMT ASH_PRINTF
+testing "sh keeps pipeline and substitution PS4 effects in children" \
+	"\"\$bindir/busybox.exe\" ash xtrace-state-script.sh 2>/dev/null" \
+	"unset\nunset\n" "" ""
+rm -f xtrace-state-script.sh
+
 cat >suffix-script.sh <<'EOF'
 mode=$1
 PATH="$PWD/suffix-bin:$PATH"
@@ -144,14 +252,22 @@ for command in busybox-suffix ./suffix-bin/busybox-suffix \
 done
 EOF
 optional PLATFORM_MINGW32 ASH ASH_TEST ASH_ECHO ASH_PRINTF
-testing "sh finds a directly spawned simple command's .exe suffix" \
+testing "sh finds a directly spawned command's .exe suffix" \
 	"mkdir suffix-bin && \
 	cp \"\$bindir/busybox.exe\" suffix-bin/busybox-suffix.exe && \
-	\"\$bindir/busybox.exe\" ash suffix-script.sh simple" \
+	\"\$bindir/busybox.exe\" ash suffix-script.sh pipeline" \
+	"direct\ndirect\ndirect\n" "" ""
+
+testing "sh finds a directly spawned simple command's .exe suffix" \
+	"\"\$bindir/busybox.exe\" ash suffix-script.sh simple" \
 	"direct\ndirect\ndirect\n" "" ""
 rm -rf suffix-bin suffix-script.sh
 
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK WHICH
+testing "sh keeps which's standalone-shell context in a pipeline" \
+	"\"\$bindir/busybox.exe\" ash -c 'which /bin/cat | cat'" \
+	"cat\n" "" ""
+
 testing "sh keeps which's standalone-shell context as a simple command" \
 	"\"\$bindir/busybox.exe\" ash -c 'which /bin/cat; true'" \
 	"cat\n" "" ""
@@ -161,6 +277,29 @@ testing "sh continues after an empty batch file" \
 	": >empty-batch-pr17.bat; \
 	\"\$bindir/busybox.exe\" ash -c \
 	'./empty-batch-pr17.bat; echo status=\$?; echo survived'; \
+	rm -f empty-batch-pr17.bat" \
+	"status=0\nsurvived\n" "" ""
+
+optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK WHICH
+testing "sh does not trace a fast-path fallback command twice" \
+	"echo 'set -x; which /bin/cat | cat' >which-trace-script.sh; \
+	trace=\$(\"\$bindir/busybox.exe\" ash which-trace-script.sh \
+		2>&1 1>/dev/null); \
+	echo \"\$trace\" | grep -c '^+ which /bin/cat\$'" \
+	"1\n" "" ""
+rm -f which-trace-script.sh
+
+optional PLATFORM_MINGW32
+testing "sh survives an empty pipeline command word" \
+	"\"\$bindir/busybox.exe\" ash -c \
+	'unset empty; \$empty | cat; echo survived \$?'" \
+	"survived 0\n" "" ""
+
+optional PLATFORM_MINGW32 ASH ASH_ECHO CAT
+testing "sh continues after an empty batch pipeline" \
+	": >empty-batch-pr17.bat; \
+	\"\$bindir/busybox.exe\" ash -c \
+	'./empty-batch-pr17.bat | cat; echo status=\$?; echo survived'; \
 	rm -f empty-batch-pr17.bat" \
 	"status=0\nsurvived\n" "" ""
 
