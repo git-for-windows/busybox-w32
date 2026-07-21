@@ -6616,6 +6616,7 @@ save_fd_on_redirect(int fd, int avoid_fd, struct redirtab *sq)
 			 */
 			if (fd == pf->pf_fd) {
 				pf->pf_fd = xdup_CLOEXEC_and_close(fd, avoid_fd);
+				add_squirrel_closed(sq, fd);
 				return 1; /* "we closed fd" */
 			}
 			pf = pf->prev;

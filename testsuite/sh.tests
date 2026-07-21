@@ -114,6 +114,14 @@ testing "sh read with \\CR" \
 	"printf '1\\\\\r2\\r\\n' | { read var; printf \"\${var}\\\\n\"; }" \
 	"1\r2\n" "" ""
 
+testing "sh restores a redirected script fd" \
+	"echo 'echo 13>file; rm file' >redir-script; \
+	BUSYBOX=\"\$bindir/busybox\"; export BUSYBOX; \
+	\"\$BUSYBOX\" ash -c 'exec 10</dev/null 11</dev/null 12</dev/null; \
+	\"\$BUSYBOX\" ash redir-script'; test ! -e file" \
+	"\n" "" ""
+rm -f redir-script file
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \
