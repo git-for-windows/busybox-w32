@@ -31,7 +31,19 @@ testing "head -n <positive number>" \
 	"line 1\nline 2\n" \
 	"" ""
 
+testing "head resets stdin state between NOFORK invocations" \
+	"\"\$bindir/busybox\" ash -c 'head -n1 <head.input; \
+	head -n1 <head.input'" \
+	"line 1\nline 1\n" \
+	"" ""
+
 optional FEATURE_FANCY_HEAD
+testing "head reuses stdin stream within one invocation" \
+	"printf 'line 1\nline 2\n' | \
+	\"\$bindir/busybox\" ash -c 'head -q -n1 - -'" \
+	"line 1\nline 2\n" \
+	"" ""
+
 testing "head -n <negative number>" \
 	"head -n -9 head.input" \
 	"line 1\nline 2\nline 3\n" \

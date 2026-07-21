@@ -178,7 +178,9 @@ int head_main(int argc, char **argv)
 # define negative_N        0
 #endif
 	FILE *fp;
+	FILE *stdin_fp = NULL;
 	const char *fmt;
+	const char *name;
 	char *p;
 	int opt;
 	int retval = EXIT_SUCCESS;
@@ -224,7 +226,7 @@ int head_main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 	if (!*argv)
-		*--argv = (char*)"-";
+		argv = (char **)&bb_argv_dash;
 
 	fmt = header_fmt_str + 1;
 	if (argc <= header_threshhold) {
@@ -240,13 +242,25 @@ int head_main(int argc, char **argv)
 	}
 
 	do {
-		fp = fopen_or_warn_stdin(*argv);
+		name = *argv;
+		fp = fopen_or_warn_stdin(name);
 		if (fp) {
 			if (fp == stdin) {
-				*argv = (char *) bb_msg_standard_input;
+				if (!stdin_fp) {
+					int fd = dup(STDIN_FILENO);
+					if (fd < 0) {
+						bb_simple_perror_msg(
+							bb_msg_standard_input);
+						retval = EXIT_FAILURE;
+						goto next_file;
+					}
+					stdin_fp = xfdopen_for_read(fd);
+				}
+				fp = stdin_fp;
+				name = bb_msg_standard_input;
 			}
 			if (header_threshhold) {
-				printf(fmt, *argv);
+				printf(fmt, name);
 			}
 			if (negative_N) {
 				if (count_bytes) {
@@ -258,16 +272,21 @@ int head_main(int argc, char **argv)
 				print_first_N(fp, count, count_bytes);
 			}
 			die_if_ferror_stdout();
-			if (fclose_if_not_stdin(fp)) {
-				bb_simple_perror_msg(*argv);
+			if (fp != stdin_fp && fclose_if_not_stdin(fp)) {
+				bb_simple_perror_msg(name);
 				retval = EXIT_FAILURE;
 			}
 		} else {
 			retval = EXIT_FAILURE;
 		}
+ next_file:
 		fmt = header_fmt_str;
 	} while (*++argv);
 
+	if (stdin_fp && fclose(stdin_fp)) {
+		bb_simple_perror_msg(bb_msg_standard_input);
+		retval = EXIT_FAILURE;
+	}
 	fflush_all();
 	return retval;
 }
