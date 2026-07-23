@@ -176,6 +176,23 @@ testing "sh isolates invalid pipeline arithmetic" \
 	echo survived' 2>/dev/null" \
 	"survived\n" "" ""
 
+testing "sh captures a simple external command" \
+	"value='hello world'; \
+	output=\$(\"\$bindir/busybox.exe\" printf '%s\\n\\n' \"\$value\"); \
+	printf '<%s>\\n' \"\$output\"" \
+	"<hello world>\n" "" ""
+
+testing "sh records a direct command substitution failure" \
+	"output=\$(\"\$bindir/busybox.exe\" false); \
+	status=\$?; test -z \"\$output\"; test \"\$status\" -eq 1" \
+	"" "" ""
+
+testing "sh isolates command substitution expansion" \
+	"unset value; \
+	output=\$(\"\$bindir/busybox.exe\" true \"\${value:=after}\"); \
+	test -z \"\$output\"; test \"\${value-unset}\" = unset" \
+	"" "" ""
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \
