@@ -27,7 +27,7 @@
 //config:	help
 //config:	Display nonprinting characters as escape sequences
 
-//applet:IF_CAT(APPLET(cat, BB_DIR_BIN, BB_SUID_DROP))
+//applet:IF_CAT(APPLET_NOFORK(cat, cat, BB_DIR_BIN, BB_SUID_DROP, cat))
 
 //kbuild:lib-$(CONFIG_CAT) += cat.o
 
@@ -155,11 +155,17 @@ static int catv(unsigned opts, char **argv)
 				fputs_stdout(buf);
 			}
 		}
-		if (ENABLE_FEATURE_CLEAN_UP && fd)
+		/* NOFORK: close unconditionally to avoid fd leak.  Upstream
+		 * gates this on ENABLE_FEATURE_CLEAN_UP (skips close because
+		 * exit() reclaims the fd), but under NOFORK the fd stays open
+		 * in the shell process, cumulatively exhausting the fd table
+		 * across many invocations. */
+		if (fd)
 			close(fd);
 	} while (*++argv);
 
-	fflush_stdout_and_exit(retval);
+	fflush_all();
+	return retval;
 }
 #undef CAT_OPT_n
 #undef CAT_OPT_b
@@ -208,7 +214,8 @@ int cat_main(int argc UNUSED_PARAM, char **argv)
 		do {
 			exitcode |= print_numbered_lines(&ns, *argv);
 		} while (*++argv);
-		fflush_stdout_and_exit(exitcode);
+		fflush_all();
+		return exitcode;
 	}
 	/*opts >>= 2;*/
 #endif

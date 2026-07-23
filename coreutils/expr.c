@@ -38,7 +38,7 @@
 //config:	the applet slightly larger, but will allow computation with very
 //config:	large numbers.
 
-//applet:IF_EXPR(APPLET_NOEXEC(expr, expr, BB_DIR_USR_BIN, BB_SUID_DROP, expr))
+//applet:IF_EXPR(APPLET_NOFORK(expr, expr, BB_DIR_USR_BIN, BB_SUID_DROP, expr))
 
 //kbuild:lib-$(CONFIG_EXPR) += expr.o
 
@@ -109,6 +109,7 @@ enum {
 
 /* A value is.... */
 struct valinfo {
+	struct valinfo *next;
 	smallint type;                  /* Which kind. */
 	union {                         /* The value itself. */
 		arith_t i;
@@ -120,11 +121,13 @@ typedef struct valinfo VALUE;
 /* The arguments given to the program, minus the program name.  */
 struct globals {
 	char **args;
+	VALUE *values;
+	void (*next_die_func)(void);
 } FIX_ALIASING;
 #define G (*(struct globals*)bb_common_bufsiz1)
 #define INIT_G() do { \
 	setup_common_bufsiz(); \
-	/* NB: noexec applet - globals not zeroed */ \
+	memset(&G, 0, sizeof(G)); \
 } while (0)
 
 /* forward declarations */
@@ -133,13 +136,22 @@ static VALUE *eval(void);
 
 /* Return a VALUE for I.  */
 
-static VALUE *int_value(arith_t i)
+static VALUE *alloc_value(int type)
 {
 	VALUE *v;
 
 	v = xzalloc(sizeof(VALUE));
-	if (INTEGER) /* otherwise xzalloc did it already */
-		v->type = INTEGER;
+	v->type = type;
+	v->next = G.values;
+	G.values = v;
+	return v;
+}
+
+static VALUE *int_value(arith_t i)
+{
+	VALUE *v;
+
+	v = alloc_value(INTEGER);
 	v->u.i = i;
 	return v;
 }
@@ -150,9 +162,7 @@ static VALUE *str_value(const char *s)
 {
 	VALUE *v;
 
-	v = xzalloc(sizeof(VALUE));
-	if (STRING) /* otherwise xzalloc did it already */
-		v->type = STRING;
+	v = alloc_value(STRING);
 	v->u.s = xstrdup(s);
 	return v;
 }
@@ -163,7 +173,29 @@ static void freev(VALUE *v)
 {
 	if (v->type == STRING)
 		free(v->u.s);
-	free(v);
+	v->u.s = NULL;
+	v->type = INTEGER;
+}
+
+static void free_values(void)
+{
+	while (G.values) {
+		VALUE *v = G.values;
+
+		G.values = v->next;
+		if (v->type == STRING)
+			free(v->u.s);
+		free(v);
+	}
+}
+
+static void cleanup_values_and_die(void)
+{
+	void (*next_die_func)(void) = G.next_die_func;
+
+	free_values();
+	if (next_die_func)
+		next_die_func();
 }
 
 /* Return nonzero if V is a null-string or zero-number.  */
@@ -393,8 +425,7 @@ static VALUE *eval6(void)
 		 || i1->u.i <= 0 || i2->u.i <= 0)
 			v = str_value("");
 		else {
-			v = xmalloc(sizeof(VALUE));
-			v->type = STRING;
+			v = alloc_value(STRING);
 			v->u.s = xstrndup(l->u.s + i1->u.i - 1, i2->u.i);
 		}
 		freev(l);
@@ -544,8 +575,11 @@ int expr_main(int argc, char **argv) MAIN_EXTERNALLY_VISIBLE;
 int expr_main(int argc UNUSED_PARAM, char **argv)
 {
 	VALUE *v;
+	int ret;
 
 	INIT_G();
+	G.next_die_func = die_func;
+	die_func = cleanup_values_and_die;
 
 	xfunc_error_retval = 2; /* coreutils compat */
 	G.args = argv + 1;
@@ -559,5 +593,10 @@ int expr_main(int argc UNUSED_PARAM, char **argv)
 		printf("%" PF_REZ "d\n", PF_REZ_TYPE v->u.i);
 	else
 		puts(v->u.s);
-	fflush_stdout_and_exit(null(v));
+	ret = null(v);
+	freev(v);
+	die_func = G.next_die_func;
+	free_values();
+	fflush_all();
+	return ret;
 }

@@ -114,6 +114,85 @@ testing "sh read with \\CR" \
 	"printf '1\\\\\r2\\r\\n' | { read var; printf \"\${var}\\\\n\"; }" \
 	"1\r2\n" "" ""
 
+testing "sh restores a redirected script fd" \
+	"echo 'echo 13>file; rm file' >redir-script; \
+	BUSYBOX=\"\$bindir/busybox\"; export BUSYBOX; \
+	\"\$BUSYBOX\" ash -c 'exec 10</dev/null 11</dev/null 12</dev/null; \
+	\"\$BUSYBOX\" ash redir-script'; test ! -e file" \
+	"\n" "" ""
+rm -f redir-script file
+
+testing "sh expands ordinary variables in pipeline commands" \
+	"value='hello world'; echo 'hello world' | grep -F \"\$value\"" \
+	"hello world\n" "" ""
+
+testing "sh expands variable lengths in pipeline commands" \
+	"value=hello; echo 5 | grep -F \"\${#value}\"" \
+	"5\n" "" ""
+
+testing "sh isolates assigning pipeline expansions" \
+	"unset value; \
+	\"\$bindir/busybox.exe\" true \"\${value:=after}\" | cat; \
+	printf '<%s>\\n' \"\${value-unset}\"" \
+	"<unset>\n" "" ""
+
+testing "sh isolates dynamic pipeline variables" \
+	"RANDOM=123; \"\$bindir/busybox.exe\" true \"\$RANDOM\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates nounset pipeline expansion errors" \
+	"sh -c 'set -u; \
+	\"\$bindir/busybox.exe\" true \"\$missing\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh expands simple pipeline arithmetic" \
+	"start=1; len=3; printf abcdef | \
+	cut -c\$((start + 1))-\$((start + \$len))" \
+	"bcd\n" "" ""
+
+testing "sh isolates assigning pipeline arithmetic" \
+	"value=1; \
+	\"\$bindir/busybox.exe\" true \"\$((value += 1))\" | cat; \
+	printf '%s\\n' \"\$value\"" \
+	"1\n" "" ""
+
+testing "sh isolates dynamic pipeline arithmetic" \
+	"RANDOM=123; \
+	\"\$bindir/busybox.exe\" true \"\$((RANDOM + 1))\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates pipeline arithmetic errors" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((1 / 0))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh isolates invalid pipeline arithmetic" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((08))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh captures a simple external command" \
+	"value='hello world'; \
+	output=\$(\"\$bindir/busybox.exe\" printf '%s\\n\\n' \"\$value\"); \
+	printf '<%s>\\n' \"\$output\"" \
+	"<hello world>\n" "" ""
+
+testing "sh records a direct command substitution failure" \
+	"output=\$(\"\$bindir/busybox.exe\" false); \
+	status=\$?; test -z \"\$output\"; test \"\$status\" -eq 1" \
+	"" "" ""
+
+testing "sh isolates command substitution expansion" \
+	"unset value; \
+	output=\$(\"\$bindir/busybox.exe\" true \"\${value:=after}\"); \
+	test -z \"\$output\"; test \"\${value-unset}\" = unset" \
+	"" "" ""
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \

@@ -46,7 +46,7 @@
 //config:	help
 //config:	Use "unsigned long long" for counter variables.
 
-//applet:IF_WC(APPLET(wc, BB_DIR_USR_BIN, BB_SUID_DROP))
+//applet:IF_WC(APPLET_NOFORK(wc, wc, BB_DIR_USR_BIN, BB_SUID_DROP, wc))
 
 //kbuild:lib-$(CONFIG_WC) += wc.o
 
@@ -253,5 +253,6 @@ int wc_main(int argc UNUSED_PARAM, char **argv)
 		goto OUTPUT;
 	}
 
-	fflush_stdout_and_exit(status);
+	fflush_all();
+	return status;
 }

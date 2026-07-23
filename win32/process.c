@@ -128,6 +128,131 @@ void FAST_FUNC initialize_critical_sections(void)
 	atexit(kill_spawned_processes_on_signal);
 }
 
+#if defined(_UCRT)
+static const wchar_t *
+find_environment_entry(const wchar_t *block,
+		const wchar_t *name, size_t name_len)
+{
+	const wchar_t *entry;
+
+	for (entry = block; *entry; entry += wcslen(entry) + 1) {
+		if (entry[0] != '=' &&
+				_wcsnicmp(entry, name, name_len) == 0 &&
+				entry[name_len] == '=')
+			return entry;
+	}
+	return NULL;
+}
+
+static const wchar_t *
+find_wenv_entry(wchar_t **wenv, const wchar_t *name, size_t name_len)
+{
+	int i;
+
+	for (i = 0; wenv[i]; i++) {
+		if (wenv[i][0] != '=' &&
+				_wcsnicmp(wenv[i], name, name_len) == 0 &&
+				wenv[i][name_len] == '=')
+			return wenv[i];
+	}
+	return NULL;
+}
+
+static int
+set_environment_entry(const wchar_t *entry)
+{
+	const wchar_t *equals;
+	wchar_t *name;
+	size_t name_len;
+
+	if (entry[0] == '=')
+		return 0;
+	equals = wcschr(entry, '=');
+	if (!equals)
+		return 0;
+	name_len = equals - entry;
+	name = alloca((name_len + 1) * sizeof(*name));
+	memcpy(name, entry, name_len * sizeof(*name));
+	name[name_len] = L'\0';
+	return SetEnvironmentVariableW(name, equals + 1) ? 0 : -1;
+}
+
+static int
+delete_environment_entry(const wchar_t *entry)
+{
+	const wchar_t *equals;
+	wchar_t *name;
+	size_t name_len;
+
+	if (entry[0] == '=')
+		return 0;
+	equals = wcschr(entry, '=');
+	if (!equals)
+		return 0;
+	name_len = equals - entry;
+	name = alloca((name_len + 1) * sizeof(*name));
+	memcpy(name, entry, name_len * sizeof(*name));
+	name[name_len] = L'\0';
+	return SetEnvironmentVariableW(name, NULL) ? 0 : -1;
+}
+
+static int
+install_spawn_environment(wchar_t **wenv, const wchar_t *old_environment)
+{
+	const wchar_t *entry;
+	int i;
+
+	for (entry = old_environment; *entry; entry += wcslen(entry) + 1) {
+		const wchar_t *equals;
+
+		if (entry[0] == '=')
+			continue;
+		equals = wcschr(entry, '=');
+		if (equals && !find_wenv_entry(wenv, entry, equals - entry) &&
+				delete_environment_entry(entry) < 0)
+			return -1;
+	}
+	for (i = 0; wenv[i]; i++) {
+		const wchar_t *equals;
+		const wchar_t *old_entry;
+
+		if (wenv[i][0] == '=')
+			continue;
+		equals = wcschr(wenv[i], '=');
+		if (!equals)
+			continue;
+		old_entry = find_environment_entry(old_environment,
+				wenv[i], equals - wenv[i]);
+		if ((!old_entry || wcscmp(old_entry, wenv[i]) != 0) &&
+				set_environment_entry(wenv[i]) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int
+restore_spawn_environment(wchar_t **wenv, const wchar_t *old_environment)
+{
+	const wchar_t *entry;
+	int i;
+	int ret = 0;
+
+	for (i = 0; wenv[i]; i++) {
+		const wchar_t *equals;
+
+		if (wenv[i][0] == '=')
+			continue;
+		equals = wcschr(wenv[i], '=');
+		if (equals && !find_environment_entry(old_environment,
+					wenv[i], equals - wenv[i]))
+			ret |= delete_environment_entry(wenv[i]);
+	}
+	for (entry = old_environment; *entry; entry += wcslen(entry) + 1)
+		ret |= set_environment_entry(entry);
+	return ret;
+}
+#endif
+
 static intptr_t mingw_spawnve(int mode,
 		const char *cmd, char *const *argv, char *const *env)
 {
@@ -166,12 +291,60 @@ static intptr_t mingw_spawnve(int mode,
 	 * We cannot use _P_WAIT here because we need to kill spawned processes
 	 * if we're killed, and _P_WAIT does not let us.
 	 */
+#if defined(_UCRT)
+	if (wenv) {
+		wchar_t *old_environment;
+		DWORD environment_error;
+		int restore_failed;
+
+		/*
+		 * All callers that pass envp must have interrupts disabled.
+		 * Console control handlers run on a separate thread; allowing
+		 * one to exit midway through this temporary process-wide
+		 * environment change would leave the parent corrupted.
+		 */
+		EnterCriticalSection(&spawned_processes.mutex);
+		old_environment = GetEnvironmentStringsW();
+		if (!old_environment ||
+				install_spawn_environment(wenv,
+					old_environment) < 0) {
+			environment_error = GetLastError();
+			restore_failed = 0;
+			if (old_environment) {
+				restore_failed = restore_spawn_environment(wenv,
+					old_environment);
+				FreeEnvironmentStringsW(old_environment);
+			}
+			LeaveCriticalSection(&spawned_processes.mutex);
+			if (restore_failed)
+				abort();
+			if (!environment_error)
+				environment_error = ERROR_NOT_ENOUGH_MEMORY;
+			SetLastError(environment_error);
+			errno = err_win_to_posix();
+			ret = -1;
+			goto done;
+		}
+		ret = _wspawnve(_P_NOWAIT,
+			wcmd + (wcsncmp(wcmd, L"\\\\?\\", 4) ? 0 : 4),
+			(const wchar_t *const *)wargv, NULL);
+		restore_failed = restore_spawn_environment(wenv,
+				old_environment);
+		FreeEnvironmentStringsW(old_environment);
+		LeaveCriticalSection(&spawned_processes.mutex);
+		if (restore_failed)
+			abort();
+	} else
+#endif
 	ret = _wspawnve(_P_NOWAIT, wcmd + (wcsncmp(wcmd, L"\\\\?\\", 4) ? 0 : 4),
 		(const wchar_t *const *)wargv, (const wchar_t *const *)wenv);
 
 	if (ret != (intptr_t)-1)
 		exit_process_on_signal((HANDLE)ret);
 
+#if defined(_UCRT)
+ done:
+#endif
 	free(wargv);
 	free(wenv);
 
@@ -546,7 +719,7 @@ create_detached_process(const char *prog, char *const *argv)
 # define SPAWNVEQ(m, p, a, e) spawnveq(m, p, a, e)
 #endif
 
-static intptr_t
+intptr_t FAST_FUNC
 mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 			char *const *envp, int level)
 {
@@ -556,6 +729,32 @@ mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 	char **new_argv;
 	char *path = NULL;
 	int is_unix_path;
+	int i;
+
+	/*
+	 * MSYS2 provides /usr/bin/cmd as a Bash wrapper around COMSPEC.
+	 * Real Bash rewrites cmd.exe-style options such as "/w" into MSYS
+	 * paths.  BusyBox used to avoid that accidentally through its
+	 * misleading bash-is-ash alias.  Invoke COMSPEC directly instead:
+	 * this is both faster and preserves cmd.exe argv semantics.
+	 */
+	if (is_msys2_cmd(prog) &&
+			strcasecmp(bb_basename(prog), "cmd") == 0) {
+		const char *comspec = NULL;
+
+		if (envp) {
+			for (i = 0; envp[i]; i++) {
+				if (_strnicmp(envp[i], "COMSPEC=", 8) == 0) {
+					comspec = envp[i] + 8;
+					break;
+				}
+			}
+		}
+		if (!comspec)
+			comspec = getenv("COMSPEC");
+		if (comspec)
+			prog = comspec;
+	}
 
 	if (!parse_interpreter(prog, &interp))
 		return SPAWNVEQ(mode, prog, argv, envp);

@@ -602,6 +602,8 @@ pid_t FAST_FUNC mingw_spawn(char **argv);
 intptr_t FAST_FUNC mingw_spawn_applet(int mode, char *const *argv, char *const *envp);
 intptr_t FAST_FUNC mingw_spawn_detach(char **argv);
 intptr_t FAST_FUNC mingw_spawn_proc(const char **argv);
+intptr_t FAST_FUNC mingw_spawn_interpreter(int mode, const char *prog,
+		char *const *argv, char *const *envp, int level);
 int FAST_FUNC mingw_execv(const char *cmd, char *const *argv);
 int FAST_FUNC httpd_execv_detach(const char *cmd, char *const *argv);
 int FAST_FUNC mingw_execvp(const char *cmd, char *const *argv);
