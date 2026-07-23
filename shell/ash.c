@@ -4973,7 +4973,6 @@ waitpid_child(int *status, DWORD blocking)
 					GetExitCodeProcess(proclist[idx], &win_status);
 					*status = exit_code_to_wait_status(win_status);
 					pid = GetProcessId(proclist[idx]);
-					CloseHandle(proclist[idx]);
 					break;
 				}
 			}
