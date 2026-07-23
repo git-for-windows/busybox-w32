@@ -122,6 +122,60 @@ testing "sh restores a redirected script fd" \
 	"\n" "" ""
 rm -f redir-script file
 
+testing "sh expands ordinary variables in pipeline commands" \
+	"value='hello world'; echo 'hello world' | grep -F \"\$value\"" \
+	"hello world\n" "" ""
+
+testing "sh expands variable lengths in pipeline commands" \
+	"value=hello; echo 5 | grep -F \"\${#value}\"" \
+	"5\n" "" ""
+
+testing "sh isolates assigning pipeline expansions" \
+	"unset value; \
+	\"\$bindir/busybox.exe\" true \"\${value:=after}\" | cat; \
+	printf '<%s>\\n' \"\${value-unset}\"" \
+	"<unset>\n" "" ""
+
+testing "sh isolates dynamic pipeline variables" \
+	"RANDOM=123; \"\$bindir/busybox.exe\" true \"\$RANDOM\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates nounset pipeline expansion errors" \
+	"sh -c 'set -u; \
+	\"\$bindir/busybox.exe\" true \"\$missing\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh expands simple pipeline arithmetic" \
+	"start=1; len=3; printf abcdef | \
+	cut -c\$((start + 1))-\$((start + \$len))" \
+	"bcd\n" "" ""
+
+testing "sh isolates assigning pipeline arithmetic" \
+	"value=1; \
+	\"\$bindir/busybox.exe\" true \"\$((value += 1))\" | cat; \
+	printf '%s\\n' \"\$value\"" \
+	"1\n" "" ""
+
+testing "sh isolates dynamic pipeline arithmetic" \
+	"RANDOM=123; \
+	\"\$bindir/busybox.exe\" true \"\$((RANDOM + 1))\" | cat; \
+	after=\$RANDOM; RANDOM=123; expected=\$RANDOM; \
+	test \"\$after\" = \"\$expected\"" \
+	"" "" ""
+
+testing "sh isolates pipeline arithmetic errors" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((1 / 0))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh isolates invalid pipeline arithmetic" \
+	"sh -c '\"\$bindir/busybox.exe\" true \"\$((08))\" | cat; \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \

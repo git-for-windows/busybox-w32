@@ -11346,8 +11346,150 @@ mingw_spawn_shell_command(char **argv, const char *path, int idx, char **envp)
 			(char *const *)argv, envp, 0);
 }
 
+/*
+ * Parent-side pipeline expansion must not leak arithmetic side effects or
+ * errors. Accept only bounded decimal addition and subtraction over ordinary
+ * integer variables; everything else retains forkshell evaluation.
+ */
 static int
-static_pipeline_word(union node *arg)
+pipeline_arithmetic_var_is_integer(const char *name, size_t len,
+		int require_set)
+{
+	char varname[64];
+	const unsigned char *digits;
+	const unsigned char *value;
+	struct var *vp;
+
+	if (len + 2 > sizeof(varname))
+		return 0;
+	memcpy(varname, name, len);
+	varname[len] = '=';
+	varname[len + 1] = '\0';
+
+	vp = *findvar(varname);
+	if (vp == NULL || (vp->flags & VUNSET))
+		return !require_set;
+	if (vp->flags & VDYNAMIC)
+		return 0;
+
+	value = (const unsigned char *)var_end(vp->var_text);
+	if (*value == '+' || *value == '-')
+		value++;
+	digits = value;
+	if (!isdigit(*value))
+		return 0;
+	do {
+		value++;
+	} while (isdigit(*value));
+	return *value == '\0' &&
+		(value - digits == 1 || *digits != '0') &&
+		value - digits <= (int)sizeof(arith_t) * 2;
+}
+
+static const unsigned char *
+pipeline_arithmetic_skip_space(const unsigned char *p)
+{
+	while (isspace(*p))
+		p++;
+	return p;
+}
+
+static const unsigned char *pipeline_arithmetic_expr(
+		const unsigned char *p);
+
+static const unsigned char *
+pipeline_arithmetic_primary(const unsigned char *p)
+{
+	const unsigned char *end;
+
+	p = pipeline_arithmetic_skip_space(p);
+	if (*p == '(') {
+		p = pipeline_arithmetic_expr(p + 1);
+		if (p == NULL)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p);
+		return *p == ')' ? p + 1 : NULL;
+	}
+	if (isdigit(*p)) {
+		end = p;
+		do {
+			end++;
+		} while (isdigit(*end));
+		if ((end - p > 1 && *p == '0') ||
+				end - p > (int)sizeof(arith_t) * 2)
+			return NULL;
+		return end;
+	}
+	if (is_name(*p)) {
+		end = p + 1;
+		while (is_in_name(*end))
+			end++;
+		return pipeline_arithmetic_var_is_integer(
+				(const char *)p, end - p, 0) ? end : NULL;
+	}
+	if (*p == CTLVAR) {
+		int subtype = p[1] & VSTYPE;
+
+		p += 2;
+		end = (const unsigned char *)strchr((const char *)p, '=');
+		if (subtype != VSNORMAL || end == NULL ||
+				!pipeline_arithmetic_var_is_integer(
+					(const char *)p, end - p, 1))
+			return NULL;
+		return end + 1;
+	}
+	return NULL;
+}
+
+static const unsigned char *
+pipeline_arithmetic_factor(const unsigned char *p)
+{
+	p = pipeline_arithmetic_skip_space(p);
+	while (*p == '+' || *p == '-') {
+		if (p[1] == *p)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p + 1);
+	}
+	return pipeline_arithmetic_primary(p);
+}
+
+static const unsigned char *
+pipeline_arithmetic_expr(const unsigned char *p)
+{
+	const unsigned char *next;
+	unsigned char op;
+
+	p = pipeline_arithmetic_factor(p);
+	if (p == NULL)
+		return NULL;
+	for (;;) {
+		p = pipeline_arithmetic_skip_space(p);
+		op = *p;
+		if (op != '+' && op != '-')
+			return p;
+		if (p[1] == op)
+			return NULL;
+		next = pipeline_arithmetic_factor(p + 1);
+		if (next == NULL)
+			return NULL;
+		p = next;
+	}
+}
+
+static const unsigned char *
+pipeline_arithmetic_is_safe(const unsigned char *p)
+{
+	if (uflag)
+		return NULL;
+	p = pipeline_arithmetic_expr(p);
+	if (p == NULL)
+		return NULL;
+	p = pipeline_arithmetic_skip_space(p);
+	return *p == CTLENDARI ? p : NULL;
+}
+
+static int
+pipeline_word_is_safe_to_expand(union node *arg)
 {
 	const unsigned char *p;
 
@@ -11361,11 +11503,27 @@ static_pipeline_word(union node *arg)
 				return 0;
 			break;
 		case CTLQUOTEMARK:
-			break;
-		case CTLVAR:
 		case CTLENDVAR:
+			break;
+		case CTLVAR: {
+			struct var *vp;
+			int subtype = p[1] & VSTYPE;
+
+			if (uflag ||
+					(subtype != VSNORMAL &&
+					 subtype != VSLENGTH))
+				return 0;
+			vp = *findvar((const char *)p + 2);
+			if (vp && (vp->flags & VDYNAMIC))
+				return 0;
+			break;
+		}
 		case CTLBACKQ:
 		case CTLARI:
+			p = pipeline_arithmetic_is_safe(p + 1);
+			if (p == NULL)
+				return 0;
+			break;
 		case CTLENDARI:
 # if BASH_PROCESS_SUBST
 		case CTLTOPROC:
@@ -11460,7 +11618,8 @@ try_spawn_pipeline_command(union node *n, struct job *jp,
 
 	argc = 0;
 	for (arg = n->ncmd.args; arg; arg = arg->narg.next) {
-		if (arg->type != NARG || !static_pipeline_word(arg))
+		if (arg->type != NARG ||
+				!pipeline_word_is_safe_to_expand(arg))
 			return 0;
 	}
 
