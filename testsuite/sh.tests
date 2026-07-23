@@ -200,6 +200,55 @@ testing "sh isolates signed pipeline arithmetic substitutions" \
 	"survived\n" "" ""
 
 optional PLATFORM_MINGW32
+testing "sh captures a simple external command" \
+	"value='hello world'; \
+	output=\$(\"\$bindir/busybox.exe\" printf '%s\\n\\n' \"\$value\"); \
+	printf '<%s>\\n' \"\$output\"" \
+	"<hello world>\n" "" ""
+
+testing "sh records a direct command substitution failure" \
+	"output=\$(\"\$bindir/busybox.exe\" false); \
+	status=\$?; test -z \"\$output\"; test \"\$status\" -eq 1" \
+	"" "" ""
+
+optional PLATFORM_MINGW32 ASH ASH_ECHO
+testing "sh continues after an empty batch substitution" \
+	": >empty-batch-pr17.bat; \
+	\"\$bindir/busybox.exe\" ash -c \
+	'output=\$(./empty-batch-pr17.bat); echo status=\$?; echo survived'; \
+	rm -f empty-batch-pr17.bat" \
+	"status=0\nsurvived\n" "" ""
+
+optional PLATFORM_MINGW32 ASH FEATURE_SH_MATH ASH_ECHO
+testing "sh isolates signed substitution arithmetic" \
+	"sh -c 'a=3; x=-1; \
+	output=\$(\"\$bindir/busybox.exe\" true \"\$((a-\$x))\"); \
+	x=+1; output=\$(\"\$bindir/busybox.exe\" true \"\$((a+\$x))\"); \
+	echo survived' 2>/dev/null" \
+	"survived\n" "" ""
+
+testing "sh isolates command substitution expansion" \
+	"unset value; \
+	output=\$(\"\$bindir/busybox.exe\" true \"\${value:=after}\"); \
+	test -z \"\$output\"; test \"\${value-unset}\" = unset" \
+	"" "" ""
+
+cat >substitution-lineno.sh <<'EOF'
+unset value
+printf '%s\n' "$LINENO" "$(
+"$bindir/busybox.exe" true
+)" "$LINENO"
+printf '%s\n' "$LINENO" "$(
+"$bindir/busybox.exe" true "${value:=child}"
+)" "$LINENO" "${value-unset}"
+EOF
+optional PLATFORM_MINGW32 ASH ASH_PRINTF
+testing "sh restores the outer line number after command substitution" \
+	"\"\$bindir/busybox.exe\" ash substitution-lineno.sh" \
+	"2\n\n2\n5\n\n5\nunset\n" "" ""
+rm -f substitution-lineno.sh
+optional PLATFORM_MINGW32
+
 testing "sh retains tracing for simple pipeline commands" \
 	"echo 'set -x; \"\$bindir/busybox.exe\" true hello | cat' \
 		>xtrace-script.sh; \
@@ -261,6 +310,10 @@ testing "sh finds a directly spawned command's .exe suffix" \
 testing "sh finds a directly spawned simple command's .exe suffix" \
 	"\"\$bindir/busybox.exe\" ash suffix-script.sh simple" \
 	"direct\ndirect\ndirect\n" "" ""
+
+testing "sh finds a command substitution's .exe suffix without an evaluator" \
+	"\"\$bindir/busybox.exe\" ash suffix-script.sh substitution" \
+	"direct\ndirect\ndirect\n" "" ""
 rm -rf suffix-bin suffix-script.sh
 
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK WHICH
@@ -302,6 +355,12 @@ testing "sh continues after an empty batch pipeline" \
 	'./empty-batch-pr17.bat | cat; echo status=\$?; echo survived'; \
 	rm -f empty-batch-pr17.bat" \
 	"status=0\nsurvived\n" "" ""
+
+optional PLATFORM_MINGW32
+testing "sh survives an empty command substitution word" \
+	"\"\$bindir/busybox.exe\" ash -c \
+	'unset empty; x=\$(\$empty); echo survived \$?'" \
+	"survived 0\n" "" ""
 
 optional PLATFORM_MINGW32 ASH FEATURE_SH_STANDALONE FEATURE_SH_NOFORK \
 	EXPR EXPR_MATH_SUPPORT_64

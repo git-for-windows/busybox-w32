@@ -7852,6 +7852,39 @@ evaltreenr(union node *n, int flags)
 	/* NOTREACHED */
 }
 
+#if ENABLE_PLATFORM_MINGW32
+static int try_spawn_simple_command(union node *n, struct job *jp,
+		int prevfd, int pipe_read, int pipe_write, int mode);
+
+static int
+try_spawn_backcmd(union node *n, struct job *jp,
+		int pipe_read, int pipe_write)
+{
+	struct nodelist *saved_argbackq = argbackq;
+	char *saved_expdest = expdest;
+	struct ifsregion saved_ifsfirst = ifsfirst;
+	struct ifsregion *saved_ifslastp = ifslastp;
+	struct arglist saved_exparg = exparg;
+	int saved_lineno = lineno;
+	int saved_errlinno = errlinno;
+	int handled;
+
+	memset(&ifsfirst, 0, sizeof(ifsfirst));
+	ifslastp = NULL;
+	handled = try_spawn_simple_command(n, jp, -1,
+			pipe_read, pipe_write, FORK_NOJOB);
+	ifsfree();
+	argbackq = saved_argbackq;
+	expdest = saved_expdest;
+	ifsfirst = saved_ifsfirst;
+	ifslastp = saved_ifslastp;
+	exparg = saved_exparg;
+	lineno = saved_lineno;
+	errlinno = saved_errlinno;
+	return handled;
+}
+#endif
+
 static void FAST_FUNC
 evalbackcmd(union node *n, struct backcmd *result
 				IF_BASH_PROCESS_SUBST(, int ctl))
@@ -7882,13 +7915,16 @@ evalbackcmd(union node *n, struct backcmd *result
 	/* process substitution uses NULL job, like openhere() */
 	jp = (ctl == CTLBACKQ) ? makejob(1) : NULL;
 #if ENABLE_PLATFORM_MINGW32
-	memset(&fs, 0, sizeof(fs));
-	fs.fpid = FS_EVALBACKCMD;
-	fs.n = n;
-	fs.fd[0] = pip[0];
-	fs.fd[1] = pip[1];
-	fs.fd[2] = ctl;
-	spawn_forkshell(&fs, jp, n, FORK_NOJOB);
+	if (ctl != CTLBACKQ ||
+			!try_spawn_backcmd(n, jp, pip[ip], pip[ic])) {
+		memset(&fs, 0, sizeof(fs));
+		fs.fpid = FS_EVALBACKCMD;
+		fs.n = n;
+		fs.fd[0] = pip[0];
+		fs.fd[1] = pip[1];
+		fs.fd[2] = ctl;
+		spawn_forkshell(&fs, jp, n, FORK_NOJOB);
+	}
 #else
 	if (forkshell(jp, n, FORK_NOJOB) == 0) {
 		/* child */
@@ -11618,8 +11654,8 @@ restore_standard_fd(int fd, int saved)
  * expansion can change shell state.
  */
 static int
-try_spawn_pipeline_command(union node *n, struct job *jp,
-		int prevfd, int pipe_read, int pipe_write)
+try_spawn_simple_command(union node *n, struct job *jp,
+		int prevfd, int pipe_read, int pipe_write, int mode)
 {
 	struct stackmark smark;
 	struct cmdentry entry;
@@ -11762,7 +11798,7 @@ try_spawn_pipeline_command(union node *n, struct job *jp,
 			ash_msg_and_raise_error(
 					"cannot duplicate process handle");
 		}
-		forkparent(jp, n, FORK_FG, proc);
+		forkparent(jp, n, mode, proc);
 		handled = 1;
 	}
 
@@ -11811,8 +11847,9 @@ evalpipe(union node *n, int flags)
 		}
 #if ENABLE_PLATFORM_MINGW32
 		if (n->npipe.pipe_backgnd IF_SUW32(|| delayexit) ||
-				!try_spawn_pipeline_command(lp->n, jp,
-					prevfd, pip[0], pip[1])) {
+				!try_spawn_simple_command(lp->n, jp,
+					prevfd, pip[0], pip[1],
+					n->npipe.pipe_backgnd)) {
 			memset(&fs, 0, sizeof(fs));
 			fs.fpid = FS_EVALPIPE;
 			fs.flags = flags;
