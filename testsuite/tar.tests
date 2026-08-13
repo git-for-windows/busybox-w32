@@ -317,6 +317,8 @@ cd .. || exit 1; rm -rf tar.tempdir 2>/dev/null
 if test x"$CONFIG_UNICODE_USING_LOCALE" != x"y"; then
 mkdir tar.tempdir && cd tar.tempdir || exit 1
 optional UNICODE_SUPPORT FEATURE_TAR_GNU_EXTENSIONS FEATURE_SEAMLESS_BZ2 FEATURE_TAR_AUTODETECT
+# MinGW ls substitutes some non-ASCII filename bytes when stdout is piped.
+test x"$SKIP_KNOWN_BUGS" != x"" && test x"$CONFIG_PLATFORM_MINGW32" = x"y" && SKIP=1
 testing "tar Pax-encoded UTF8 names and symlinks" '\
 tar xvf ../tar.utf8.tar.bz2 2>&1; echo $?
 export LANG=en_US.UTF-8

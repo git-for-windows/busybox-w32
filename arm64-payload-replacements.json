@@ -56,6 +56,11 @@
       "reason": "BusyBox awk is not a drop-in replacement for versioned gawk executables or gawk extension DLLs."
     },
     {
+      "scope": "ls/tar UTF-8 filename display",
+      "status": "known-gap",
+      "reason": "MinGW ls substitutes some non-ASCII filename bytes when stdout is piped; the PAX filename test is gated by SKIP_KNOWN_BUGS."
+    },
+    {
       "scope": "non-applet executables and DLLs",
       "status": "architecture-gap",
       "reason": "No exact applet entry point exists in the ARM64 BusyBox configuration."
