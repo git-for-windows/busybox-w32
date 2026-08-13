@@ -485,7 +485,7 @@ static int writeLines(const char *file, int num1, int num2)
 
 	charCount = 0;
 
-	fd = creat(file, 0666);
+	fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 	if (fd < 0) {
 		bb_simple_perror_msg(file);
 		return FALSE;

@@ -88,15 +88,6 @@ jobs:
         DEBUG: true
         LC_ALL: C
         TZ: UTC
-    - name: run testsuite
-      shell: msys2 {0}
-      working-directory: ./testsuite
-      run: ../busybox.exe sh ./runtest -v
-      env:
-        DEBUG: true
-        LC_ALL: C
-        SKIP_KNOWN_BUGS: true
-        TZ: UTC
     - name: upload native ARM64 artifact
       uses: actions/upload-artifact@v6
       with:
@@ -104,3 +95,12 @@ jobs:
         path: |
           busybox.exe
           arm64-payload-replacements.json
+    - name: run testsuite
+      shell: msys2 {0}
+      working-directory: ./testsuite
+      run: ../busybox.exe sh ./runtest -v
+      env:
+        DEBUG: true
+        LC_ALL: C.UTF-8
+        SKIP_KNOWN_BUGS: true
+        TZ: UTC
