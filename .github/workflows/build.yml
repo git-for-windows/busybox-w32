@@ -60,7 +60,7 @@ jobs:
           zip
     - name: mingw64a_defconfig
       shell: msys2 {0}
-      run: make -j$(nproc) mingw64a_defconfig
+      run: make -j$(nproc) HOST_COMPILER=clang mingw64a_defconfig
     - name: build native ARM64 busybox.exe
       shell: msys2 {0}
       run: make -j$(nproc) busybox.exe
