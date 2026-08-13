@@ -474,7 +474,9 @@ typedef unsigned smalluint;
 # undef HAVE_DPRINTF
 # undef HAVE_GETLINE
 # undef HAVE_MEMRCHR
-# if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 14
+/* WoArm64 GCC's mingw-w64 14 headers don't declare mkdtemp(). */
+# if !defined(__MINGW64_VERSION_MAJOR) || __MINGW64_VERSION_MAJOR < 14 \
+  || ((defined(__aarch64__) || defined(_M_ARM64)) && !defined(__clang__))
 # undef HAVE_MKDTEMP
 # endif
 # undef HAVE_SETBIT

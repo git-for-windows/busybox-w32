@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "sourcePullRequest": "https://github.com/git-for-windows/build-extra/pull/728",
+    "releaseTag": "v2.55.0.windows.4",
+    "packages": {
+      "coreutils": 108,
+      "gawk": 17,
+      "diffutils": 4,
+      "findutils": 4,
+      "unzip": 4
+    },
+    "pePathCount": 137
+  },
+  "interpretation": {
+    "architectureSupport": "A direct candidate has an exact applet-name match in configs/mingw64a_defconfig and can be backed by the native ARM64 busybox.exe artifact.",
+    "semanticParity": "Direct-candidate status does not assert GNU or package-level semantic parity. The native ARM64 CI smoke test covers Git-critical behavior only; package replacement still requires consumer and package test validation."
+  },
+  "summary": {
+    "directArm64CandidateCount": 84,
+    "potentialX64PeReduction": 84,
+    "architectureGapCount": 53
+  },
+  "nativeArm64Validation": {
+    "workflow": ".github/workflows/build.yml",
+    "peMachine": "0xAA64",
+    "smokeTest": "testsuite/all_git_critical.tests",
+    "smokeTestedApplets": [
+      "sh",
+      "cp",
+      "mv",
+      "rm",
+      "mkdir",
+      "cat",
+      "sort",
+      "tr",
+      "sed",
+      "grep",
+      "awk",
+      "find",
+      "xargs",
+      "diff",
+      "unzip"
+    ],
+    "fullBusyBoxTestsuite": true
+  },
+  "semanticParityGaps": [
+    {
+      "scope": "all direct candidates",
+      "status": "not-claimed",
+      "reason": "BusyBox option and edge-case behavior can differ from GNU packages."
+    },
+    {
+      "scope": "gawk",
+      "status": "known-gap",
+      "reason": "BusyBox awk is not a drop-in replacement for versioned gawk executables or gawk extension DLLs."
+    },
+    {
+      "scope": "non-applet executables and DLLs",
+      "status": "architecture-gap",
+      "reason": "No exact applet entry point exists in the ARM64 BusyBox configuration."
+    }
+  ],
+  "packages": [
+    {
+      "package": "coreutils",
+      "baselinePePathCount": 108,
+      "directArm64Candidates": {
+        "usr/bin/[.exe": "[",
+        "usr/bin/arch.exe": "arch",
+        "usr/bin/base32.exe": "base32",
+        "usr/bin/base64.exe": "base64",
+        "usr/bin/basename.exe": "basename",
+        "usr/bin/cat.exe": "cat",
+        "usr/bin/chmod.exe": "chmod",
+        "usr/bin/cksum.exe": "cksum",
+        "usr/bin/comm.exe": "comm",
+        "usr/bin/cp.exe": "cp",
+        "usr/bin/cut.exe": "cut",
+        "usr/bin/date.exe": "date",
+        "usr/bin/dd.exe": "dd",
+        "usr/bin/df.exe": "df",
+        "usr/bin/dirname.exe": "dirname",
+        "usr/bin/du.exe": "du",
+        "usr/bin/echo.exe": "echo",
+        "usr/bin/env.exe": "env",
+        "usr/bin/expand.exe": "expand",
+        "usr/bin/expr.exe": "expr",
+        "usr/bin/factor.exe": "factor",
+        "usr/bin/false.exe": "false",
+        "usr/bin/fold.exe": "fold",
+        "usr/bin/groups.exe": "groups",
+        "usr/bin/head.exe": "head",
+        "usr/bin/id.exe": "id",
+        "usr/bin/install.exe": "install",
+        "usr/bin/join.exe": "join",
+        "usr/bin/link.exe": "link",
+        "usr/bin/ln.exe": "ln",
+        "usr/bin/logname.exe": "logname",
+        "usr/bin/ls.exe": "ls",
+        "usr/bin/md5sum.exe": "md5sum",
+        "usr/bin/mkdir.exe": "mkdir",
+        "usr/bin/mktemp.exe": "mktemp",
+        "usr/bin/mv.exe": "mv",
+        "usr/bin/nl.exe": "nl",
+        "usr/bin/nproc.exe": "nproc",
+        "usr/bin/od.exe": "od",
+        "usr/bin/paste.exe": "paste",
+        "usr/bin/printenv.exe": "printenv",
+        "usr/bin/printf.exe": "printf",
+        "usr/bin/pwd.exe": "pwd",
+        "usr/bin/readlink.exe": "readlink",
+        "usr/bin/realpath.exe": "realpath",
+        "usr/bin/rm.exe": "rm",
+        "usr/bin/rmdir.exe": "rmdir",
+        "usr/bin/seq.exe": "seq",
+        "usr/bin/sha1sum.exe": "sha1sum",
+        "usr/bin/sha256sum.exe": "sha256sum",
+        "usr/bin/sha384sum.exe": "sha384sum",
+        "usr/bin/sha512sum.exe": "sha512sum",
+        "usr/bin/shred.exe": "shred",
+        "usr/bin/shuf.exe": "shuf",
+        "usr/bin/sleep.exe": "sleep",
+        "usr/bin/sort.exe": "sort",
+        "usr/bin/split.exe": "split",
+        "usr/bin/stat.exe": "stat",
+        "usr/bin/stty.exe": "stty",
+        "usr/bin/sum.exe": "sum",
+        "usr/bin/sync.exe": "sync",
+        "usr/bin/tac.exe": "tac",
+        "usr/bin/tail.exe": "tail",
+        "usr/bin/tee.exe": "tee",
+        "usr/bin/test.exe": "test",
+        "usr/bin/timeout.exe": "timeout",
+        "usr/bin/touch.exe": "touch",
+        "usr/bin/tr.exe": "tr",
+        "usr/bin/true.exe": "true",
+        "usr/bin/truncate.exe": "truncate",
+        "usr/bin/tsort.exe": "tsort",
+        "usr/bin/uname.exe": "uname",
+        "usr/bin/unexpand.exe": "unexpand",
+        "usr/bin/uniq.exe": "uniq",
+        "usr/bin/unlink.exe": "unlink",
+        "usr/bin/wc.exe": "wc",
+        "usr/bin/whoami.exe": "whoami",
+        "usr/bin/yes.exe": "yes"
+      },
+      "architectureGaps": {
+        "missing-or-different-applet": [
+          "usr/bin/b2sum.exe",
+          "usr/bin/basenc.exe",
+          "usr/bin/chcon.exe",
+          "usr/bin/chgrp.exe",
+          "usr/bin/chown.exe",
+          "usr/bin/chroot.exe",
+          "usr/bin/csplit.exe",
+          "usr/bin/dir.exe",
+          "usr/bin/dircolors.exe",
+          "usr/bin/fmt.exe",
+          "usr/bin/gkill.exe",
+          "usr/bin/hostid.exe",
+          "usr/bin/hostname.exe",
+          "usr/bin/mkfifo.exe",
+          "usr/bin/mknod.exe",
+          "usr/bin/nice.exe",
+          "usr/bin/nohup.exe",
+          "usr/bin/numfmt.exe",
+          "usr/bin/pathchk.exe",
+          "usr/bin/pinky.exe",
+          "usr/bin/pr.exe",
+          "usr/bin/ptx.exe",
+          "usr/bin/runcon.exe",
+          "usr/bin/sha224sum.exe",
+          "usr/bin/stdbuf.exe",
+          "usr/bin/tty.exe",
+          "usr/bin/users.exe",
+          "usr/bin/vdir.exe",
+          "usr/bin/who.exe"
+        ],
+        "support-library-or-extension": [
+          "usr/lib/coreutils/libstdbuf.dll"
+        ]
+      }
+    },
+    {
+      "package": "gawk",
+      "baselinePePathCount": 17,
+      "directArm64Candidates": {
+        "usr/bin/awk.exe": "awk"
+      },
+      "architectureGaps": {
+        "missing-or-different-applet": [
+          "usr/bin/gawk-5.4.0.exe",
+          "usr/bin/gawk.exe",
+          "usr/lib/awk/grcat.exe",
+          "usr/lib/awk/pwcat.exe"
+        ],
+        "support-library-or-extension": [
+          "usr/lib/gawk/filefuncs.dll",
+          "usr/lib/gawk/fnmatch.dll",
+          "usr/lib/gawk/fork.dll",
+          "usr/lib/gawk/inplace.dll",
+          "usr/lib/gawk/intdiv.dll",
+          "usr/lib/gawk/ordchr.dll",
+          "usr/lib/gawk/readdir.dll",
+          "usr/lib/gawk/readfile.dll",
+          "usr/lib/gawk/revoutput.dll",
+          "usr/lib/gawk/revtwoway.dll",
+          "usr/lib/gawk/rwarray.dll",
+          "usr/lib/gawk/time.dll"
+        ]
+      }
+    },
+    {
+      "package": "diffutils",
+      "baselinePePathCount": 4,
+      "directArm64Candidates": {
+        "usr/bin/cmp.exe": "cmp",
+        "usr/bin/diff.exe": "diff"
+      },
+      "architectureGaps": {
+        "missing-or-different-applet": [
+          "usr/bin/diff3.exe",
+          "usr/bin/sdiff.exe"
+        ],
+        "support-library-or-extension": []
+      }
+    },
+    {
+      "package": "findutils",
+      "baselinePePathCount": 4,
+      "directArm64Candidates": {
+        "usr/bin/find.exe": "find",
+        "usr/bin/xargs.exe": "xargs"
+      },
+      "architectureGaps": {
+        "missing-or-different-applet": [
+          "usr/bin/locate.exe",
+          "usr/libexec/frcode.exe"
+        ],
+        "support-library-or-extension": []
+      }
+    },
+    {
+      "package": "unzip",
+      "baselinePePathCount": 4,
+      "directArm64Candidates": {
+        "usr/bin/unzip.exe": "unzip"
+      },
+      "architectureGaps": {
+        "missing-or-different-applet": [
+          "usr/bin/funzip.exe",
+          "usr/bin/unzipsfx.exe",
+          "usr/bin/zipinfo.exe"
+        ],
+        "support-library-or-extension": []
+      }
+    }
+  ]
+}

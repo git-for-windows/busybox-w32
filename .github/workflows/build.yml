@@ -40,3 +40,67 @@ jobs:
         LC_ALL: C
         SKIP_KNOWN_BUGS: true
         TZ: UTC
+
+  arm64:
+    runs-on: windows-11-arm
+    steps:
+    - name: preserve LF line endings
+      shell: pwsh
+      run: git config --global core.autocrlf input
+    - uses: actions/checkout@v6
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: CLANGARM64
+        update: true
+        install: >-
+          base-devel
+          mingw-w64-clang-aarch64-toolchain
+          sharutils
+          xz
+          zip
+    - name: mingw64a_defconfig
+      shell: msys2 {0}
+      run: make -j$(nproc) mingw64a_defconfig
+    - name: build native ARM64 busybox.exe
+      shell: msys2 {0}
+      run: make -j$(nproc) busybox.exe
+    - name: verify native ARM64 PE
+      shell: pwsh
+      run: |
+        if ($env:PROCESSOR_ARCHITECTURE -ne 'ARM64') {
+          throw "Expected an ARM64 runner, got $env:PROCESSOR_ARCHITECTURE"
+        }
+        $bytes = [IO.File]::ReadAllBytes('busybox.exe')
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+        $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+        if ($machine -ne 0xAA64) {
+          throw ('Expected PE machine 0xAA64, got 0x{0:X4}' -f $machine)
+        }
+        $uname = .\busybox.exe uname -m
+        if ($uname -ne 'aarch64') {
+          throw "Expected uname -m to report aarch64, got $uname"
+        }
+    - name: run Git-critical applet smoke tests
+      shell: msys2 {0}
+      working-directory: ./testsuite
+      run: ../busybox.exe sh ./runtest -v all_git_critical
+      env:
+        DEBUG: true
+        LC_ALL: C
+        TZ: UTC
+    - name: run testsuite
+      shell: msys2 {0}
+      working-directory: ./testsuite
+      run: ../busybox.exe sh ./runtest -v
+      env:
+        DEBUG: true
+        LC_ALL: C
+        SKIP_KNOWN_BUGS: true
+        TZ: UTC
+    - name: upload native ARM64 artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: busybox-arm64
+        path: |
+          busybox.exe
+          arm64-payload-replacements.json

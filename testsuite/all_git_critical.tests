@@ -1,0 +1,32 @@
+#!/bin/sh
+
+. ./testing.sh
+
+# testing "description" "command" "result" "file input" "stdin"
+
+testing "sh, mkdir, cat, cp, mv and rm" \
+	"sh -c 'mkdir -p git-critical/files && printf payload >git-critical/files/source && cp git-critical/files/source git-critical/files/copy && mv git-critical/files/copy git-critical/files/moved && cat git-critical/files/moved && rm -rf git-critical && test ! -e git-critical && echo removed'" \
+	"payloadremoved\n" \
+	"" ""
+
+testing "sort, tr, sed, grep and awk" \
+	"printf 'beta\nalpha\n' | sort | tr a-z A-Z | sed 's/ALPHA/first/' | grep -v BETA | awk '{ print \$1 }'" \
+	"first\n" \
+	"" ""
+
+testing "find and xargs" \
+	"mkdir -p git-critical/find && printf 'one\n' >git-critical/find/1.txt && printf 'two\n' >git-critical/find/2.txt && find git-critical/find -name '*.txt' -print | sort | xargs cat; rm -rf git-critical" \
+	"one\ntwo\n" \
+	"" ""
+
+testing "diff" \
+	"printf same >git-critical-a && cp git-critical-a git-critical-b && diff git-critical-a git-critical-b; echo \$?; printf changed >git-critical-b && diff git-critical-a git-critical-b >/dev/null; echo \$?; rm -f git-critical-a git-critical-b" \
+	"0\n1\n" \
+	"" ""
+
+testing "unzip" \
+	"mkdir git-critical-zip && cd git-critical-zip && printf archived >packed && zip -q archive.zip packed && rm packed && unzip -q archive.zip && cat packed; cd .. && rm -rf git-critical-zip" \
+	"archived" \
+	"" ""
+
+exit $FAILCOUNT
