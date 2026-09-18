@@ -544,6 +544,31 @@ find_first_executable(const char *name)
 	return find_executable(name, &path);
 }
 
+/*
+ * Like find_first_executable(), but searches the PATH given by envp
+ * (the environment about to be handed to the spawned process) rather
+ * than this process's own environment. The two can differ, e.g. when
+ * a shell exports a PATH that hasn't been applied with putenv()/
+ * SetEnvironmentVariable() to the running busybox.exe itself.
+ */
+static char *
+find_first_executable_env(const char *name, char *const *envp)
+{
+	const char *path = NULL;
+	int i;
+
+	if (envp) {
+		for (i = 0; envp[i]; i++) {
+			if (_strnicmp(envp[i], "PATH=", 5) == 0) {
+				path = envp[i] + 5;
+				break;
+			}
+		}
+	} else
+		path = getenv("PATH");
+	return find_executable(name, &path);
+}
+
 static inline int is_slash(char c)
 {
 	return c == '/' || c == '\\';
@@ -755,7 +780,7 @@ mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 
 	path = file_is_win32_exe(interp.path);
 	if (!path && is_unix_path)
-		path = find_first_executable(interp.name);
+		path = find_first_executable_env(interp.name, envp);
 
 	if (path) {
 		new_argv[0] = path;

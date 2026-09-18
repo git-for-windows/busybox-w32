@@ -114,6 +114,38 @@ testing "sh read with \\CR" \
 	"printf '1\\\\\r2\\r\\n' | { read var; printf \"\${var}\\\\n\"; }" \
 	"1\r2\n" "" ""
 
+for marker in good bad; do
+	mkdir "interp-path-$marker"
+	printf '#!/bin/ash\necho %s\n' "$marker" \
+		>"interp-path-$marker/pr17-path-interpreter"
+	chmod +x "interp-path-$marker/pr17-path-interpreter"
+done
+printf '#!/usr/bin/pr17-path-interpreter\n' >interp-path-launch
+chmod +x interp-path-launch
+cat >interp-path-script.sh <<'EOF'
+if test "$1" = good; then
+	PATH="$PWD/interp-path-good"
+	export PATH
+else
+	unset PATH
+fi
+./interp-path-launch 2>/dev/null
+printf 'status=%s\n' "$?"
+EOF
+optional PLATFORM_MINGW32 ASH FEATURE_PREFER_APPLETS ASH_TEST ASH_ECHO \
+	ASH_PRINTF
+testing "sh resolves interpreters using the exported PATH" \
+	"PATH=\"\$PWD/interp-path-bad:\$PATH\" \
+	\"\$bindir/busybox.exe\" ash interp-path-script.sh good" \
+	"good\nstatus=0\n" "" ""
+
+testing "sh does not inherit the process PATH when PATH is unset" \
+	"PATH=\"\$PWD/interp-path-bad:\$PATH\" \
+	\"\$bindir/busybox.exe\" ash interp-path-script.sh missing" \
+	"status=127\n" "" ""
+rm -rf interp-path-good interp-path-bad interp-path-launch interp-path-script.sh
+optional PLATFORM_MINGW32
+
 case "$COMSPEC" in
 *\\cmd.exe)
 	testing "'cmd //c' works" \
