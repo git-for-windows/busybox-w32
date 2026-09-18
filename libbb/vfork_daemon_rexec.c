@@ -140,6 +140,7 @@ int FAST_FUNC run_nofork_applet(int applet_no, char **argv)
 
 	/* Restoring some globals */
 	restore_nofork_data(&old);
+	clearerr(stdout);
 	/* Other globals can be simply reset to defaults */
 	GETOPT_RESET();
 
