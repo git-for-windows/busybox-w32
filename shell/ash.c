@@ -677,6 +677,8 @@ struct globals_misc {
 	volatile /*sig_atomic_t*/ smallint pending_sig;	/* last pending signal */
 #else
 	volatile /*sig_atomic_t*/ smallint waitcmd_int;	/* SIGINT in wait */
+	/* Trapped SIGINT, independent of the wait builtin. */
+	volatile /*sig_atomic_t*/ smallint pending_trap;
 #endif
 	smallint exception_type; /* kind of exception: */
 #define EXINT 0         /* SIGINT received */
@@ -802,6 +804,7 @@ extern struct globals_misc *BB_GLOBAL_CONST ash_ptr_to_globals_misc;
 #define pending_int       (G_misc.pending_int      )
 #if ENABLE_PLATFORM_MINGW32
 #define waitcmd_int       (G_misc.waitcmd_int      )
+#define pending_trap      (G_misc.pending_trap     )
 #endif
 #define gotsigchld        (G_misc.gotsigchld       )
 #define pending_sig       (G_misc.pending_sig      )
@@ -4897,6 +4900,8 @@ static BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 			if (!suppress_int && !(rootshell && iflag))
 				raise_interrupt();
 			pending_int = 1;
+		} else {
+			pending_trap = 1;
 		}
 		return TRUE;
 	}
@@ -10849,10 +10854,12 @@ dotrap(void)
 	int status, last_status;
 	char *p;
 
-	if (!pending_int && waitcmd_int != 1) {
+	if (!pending_int && !pending_trap && waitcmd_int != 1) {
 		waitcmd_int = 0;
 		return;
 	}
+	if (evalskip)
+		return;
 
 	status = savestatus;
 	last_status = status;
@@ -10860,15 +10867,10 @@ dotrap(void)
 		status = exitstatus;
 		savestatus = status;
 	}
-	pending_int = waitcmd_int = 0;
+	pending_int = waitcmd_int = pending_trap = 0;
 	barrier();
 
 	TRACE(("dotrap entered\n"));
-	if (evalskip) {
-		pending_int = 1;
-		return;
-	}
-
 	p = trap[SIGINT];
 	if (p) {
 		TRACE(("sig %d is active, will run handler '%s'\n", SIGINT, p));
@@ -18003,6 +18005,7 @@ forkshell_init(const char *idstr)
 	/* Set global variables */
 	ASSIGN_CONST_PTR(&ash_ptr_to_globals_misc, fs->gmp);
 	ASSIGN_CONST_PTR(&ash_ptr_to_globals_var, fs->gvp);
+	pending_trap = 0;
 	cmdtable = fs->cmdtable;
 #if ENABLE_ASH_ALIAS
 	atab = fs->atab;	/* will be NULL for FS_SHELLEXEC */
