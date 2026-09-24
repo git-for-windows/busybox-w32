@@ -4892,6 +4892,8 @@ sprint_status48(char *os, int status, int sigonly)
 static BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 {
 	if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT) {
+		volatile smallint *pending;
+
 # if ENABLE_FEATURE_EDITING
 		bb_got_signal = SIGINT; /* for read_line_input: "we got a signal" */
 # endif
@@ -4899,10 +4901,24 @@ static BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 		if (!trap[SIGINT]) {
 			if (!suppress_int && !(rootshell && iflag))
 				raise_interrupt();
-			pending_int = 1;
+			pending = &pending_int;
 		} else {
-			pending_trap = 1;
+			pending = &pending_trap;
 		}
+# if ENABLE_FEATURE_SH_NOFORK
+		if (mingw_cancel_nofork_io(pending) < 0) {
+			static const char message[] =
+				"ash: cannot cancel in-process I/O\n";
+			DWORD written;
+
+			/* The main thread may hold a stdio lock. */
+			if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
+					sizeof(message) - 1, &written, NULL))
+				OutputDebugStringA(message);
+		}
+# else
+		*pending = 1;
+# endif
 		return TRUE;
 	}
 	return FALSE;
@@ -12466,40 +12482,48 @@ evalcommand(union node *cmd, int flags)
 			char **sv_environ;
 #if ENABLE_PLATFORM_MINGW32
 			char *sv_argv0;
+			int io_scope, io_signal = 0;
+			volatile smallint *pending = trap[SIGINT]
+				? (trap[SIGINT][0] ? &pending_trap : NULL)
+				: &pending_int;
 #endif
 
 			INTOFF;
 			sv_environ = environ;
 			environ = listvars(VEXPORT, VUNSET, varlist.list, /*end:*/ NULL);
-			/*
-			 * Run <applet>_main().
-			 * Signals (^C) can't interrupt here.
-			 * Otherwise we can mangle stdio or malloc internal state.
-			 * This makes applets which can run for a long time
-			 * and/or wait for user input ineligible for NOFORK:
-			 * for example, "yes" or "rm" (rm -i waits for input).
-			 */
+			/* Defer exceptions until applet cleanup. */
 #if ENABLE_PLATFORM_MINGW32
-			sv_argv0 = __argv[0];
-			argv[0] = (char *)bb_basename(argv[0]);
-			__argv[0] = argv[0];
+			io_scope = mingw_begin_nofork_io(applet_no, pending);
+			if (io_scope >= 0) {
+				sv_argv0 = __argv[0];
+				argv[0] = (char *)bb_basename(argv[0]);
+				__argv[0] = argv[0];
+				if (bb_nofork_signal)
+					exitstatus = 128 + bb_nofork_signal;
+				else
 #endif
-			exitstatus = run_nofork_applet(applet_no, argv);
+					exitstatus = run_nofork_applet(
+							applet_no, argv);
+#if ENABLE_PLATFORM_MINGW32
+				__argv[0] = sv_argv0;
+			}
+#endif
 			environ = sv_environ;
 #if ENABLE_PLATFORM_MINGW32
-			__argv[0] = sv_argv0;
+			if (io_scope > 0)
+				io_signal = mingw_end_nofork_io();
+			if (io_signal) {
+				clearerr(stdin);
+				clearerr(stdout);
+				clearerr(stderr);
+				exitstatus = 128 + io_signal;
+			}
 #endif
-			/*
-			 * Try enabling NOFORK for "yes" applet.
-			 * ^C _will_ stop it (write returns EINTR),
-			 * but this causes stdout FILE to be stuck
-			 * and needing clearerr(). What if other applets
-			 * also can get EINTRs? Do we need to switch
-			 * our signals to SA_RESTART?
-			 */
-			/*clearerr(stdout);*/
 			INTON;
-			break;
+#if ENABLE_PLATFORM_MINGW32
+			if (io_scope >= 0)
+#endif
+				break;
 		}
 #endif
 		/* Fork off a child process if necessary. */

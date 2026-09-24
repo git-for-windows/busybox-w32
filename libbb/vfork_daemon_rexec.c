@@ -21,7 +21,7 @@
 #define NOEXEC_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE))
 
 #if ENABLE_PLATFORM_MINGW32 && ENABLE_FEATURE_SH_NOFORK
-volatile sig_atomic_t bb_nofork_signal;
+volatile LONG bb_nofork_signal;
 #endif
 
 #if defined(__linux__) && (NUM_APPLETS > 1)

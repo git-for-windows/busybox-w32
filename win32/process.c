@@ -51,6 +51,17 @@ static struct {
 	HANDLE *h;
 } spawned_processes;
 
+#if ENABLE_FEATURE_SH_NOFORK
+static struct {
+	CRITICAL_SECTION mutex;
+	HANDLE thread;
+	DWORD thread_id;
+	ULONGLONG generation;
+	int active;
+	BOOL (WINAPI *cancel)(HANDLE);
+} nofork_io;
+#endif
+
 static int kill_signal_by_handle(HANDLE process, int sig);
 
 static void kill_spawned_processes_on_signal(void)
@@ -125,8 +136,102 @@ static void exit_process_on_signal(HANDLE process)
 void FAST_FUNC initialize_critical_sections(void)
 {
 	InitializeCriticalSection(&spawned_processes.mutex);
+#if ENABLE_FEATURE_SH_NOFORK
+	InitializeCriticalSection(&nofork_io.mutex);
+#endif
 	atexit(kill_spawned_processes_on_signal);
 }
+
+#if ENABLE_FEATURE_SH_NOFORK
+int FAST_FUNC mingw_begin_nofork_io(int applet_no,
+		volatile smallint *pending)
+{
+	DWORD thread_id;
+	DECLARE_PROC_ADDR(BOOL, CancelSynchronousIo, HANDLE);
+
+	if (!pending || !applet_can_cancel_io(applet_no))
+		return 0;
+	thread_id = GetCurrentThreadId();
+	EnterCriticalSection(&nofork_io.mutex);
+	if (nofork_io.active ||
+			(nofork_io.thread &&
+			 nofork_io.thread_id != thread_id)) {
+		errno = EBUSY;
+		goto fail;
+	}
+	if (!nofork_io.thread) {
+		HANDLE thread;
+
+		if (!INIT_PROC_ADDR(kernel32.dll, CancelSynchronousIo))
+			goto fail;
+		if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+				GetCurrentProcess(), &thread,
+				THREAD_TERMINATE, FALSE, 0)) {
+			errno = err_win_to_posix();
+			goto fail;
+		}
+		/* Console callbacks can use this handle until process exit. */
+		nofork_io.thread = thread;
+		nofork_io.thread_id = thread_id;
+		nofork_io.cancel = CancelSynchronousIo;
+	}
+	nofork_io.generation++;
+	nofork_io.active = 1;
+	InterlockedExchange(&bb_nofork_signal, *pending ? SIGINT : 0);
+	LeaveCriticalSection(&nofork_io.mutex);
+	return 1;
+
+ fail:
+	LeaveCriticalSection(&nofork_io.mutex);
+	return -1;
+}
+
+int FAST_FUNC mingw_end_nofork_io(void)
+{
+	int signal;
+
+	EnterCriticalSection(&nofork_io.mutex);
+	signal = bb_nofork_signal;
+	nofork_io.active = 0;
+	InterlockedExchange(&bb_nofork_signal, 0);
+	LeaveCriticalSection(&nofork_io.mutex);
+	return signal;
+}
+
+int FAST_FUNC mingw_cancel_nofork_io(volatile smallint *pending)
+{
+	ULONGLONG generation;
+
+	EnterCriticalSection(&nofork_io.mutex);
+	/* Publish the event and select its scope together: the caller must
+	 * not consume the event and start another scope between these. */
+	*pending = 1;
+	if (!nofork_io.active) {
+		LeaveCriticalSection(&nofork_io.mutex);
+		return 0;
+	}
+	generation = nofork_io.generation;
+	InterlockedExchange(&bb_nofork_signal, SIGINT);
+	while (nofork_io.active && nofork_io.generation == generation) {
+		/* Keep scope completion from racing with this request. */
+		if (!nofork_io.cancel(nofork_io.thread)) {
+			DWORD error = GetLastError();
+
+			if (error != ERROR_NOT_FOUND) {
+				LeaveCriticalSection(&nofork_io.mutex);
+				SetLastError(error);
+				return -1;
+			}
+		}
+		LeaveCriticalSection(&nofork_io.mutex);
+		/* A request may arrive just before the read or write starts. */
+		Sleep(1);
+		EnterCriticalSection(&nofork_io.mutex);
+	}
+	LeaveCriticalSection(&nofork_io.mutex);
+	return 0;
+}
+#endif
 
 #if defined(_UCRT)
 static const wchar_t *
