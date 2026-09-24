@@ -38,7 +38,7 @@ char* FAST_FUNC bb_get_chunk_from_file(FILE *file, size_t *end)
 	die_func = free_line_and_die;
 
 #if ENABLE_PLATFORM_MINGW32
-	while ((ch = _getc_nolock(file)) != EOF) {
+	while (!bb_nofork_signal && (ch = _getc_nolock(file)) != EOF) {
 #else
 	while ((ch = getc(file)) != EOF) {
 #endif
@@ -53,6 +53,11 @@ char* FAST_FUNC bb_get_chunk_from_file(FILE *file, size_t *end)
 			break;
 		if (end && ch == '\n')
 			break;
+	}
+	if (bb_nofork_signal) {
+		free(linebuf);
+		linebuf = NULL;
+		idx = 0;
 	}
 	if (end)
 		*end = idx;

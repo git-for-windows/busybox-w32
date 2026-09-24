@@ -251,6 +251,10 @@ void FAST_FUNC xwrite(int fd, const void *buf, size_t count)
 	if (count) {
 		ssize_t size = full_write(fd, buf, count);
 		if ((size_t)size != count) {
+			if (bb_nofork_signal) {
+				xfunc_error_retval = 128 + bb_nofork_signal;
+				xfunc_die();
+			}
 			/*
 			 * Two cases: write error immediately;
 			 * or some writes succeeded, then we hit an error.
@@ -295,6 +299,10 @@ int FAST_FUNC xmkstemp(char *template)
 void FAST_FUNC die_if_ferror(FILE *fp, const char *fn)
 {
 	if (ferror(fp)) {
+		if (bb_nofork_signal) {
+			xfunc_error_retval = 128 + bb_nofork_signal;
+			xfunc_die();
+		}
 		/* ferror doesn't set useful errno */
 		bb_error_msg_and_die("%s: I/O error", fn);
 	}

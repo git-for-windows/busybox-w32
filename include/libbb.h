@@ -1532,6 +1532,12 @@ int wait_for_exitstatus(pid_t pid) FAST_FUNC;
 int spawn_and_wait(char **argv) FAST_FUNC;
 /* Does NOT check that applet is NOFORK, just blindly runs it */
 int run_nofork_applet(int applet_no, char **argv) FAST_FUNC;
+#if ENABLE_PLATFORM_MINGW32 && ENABLE_FEATURE_SH_NOFORK
+/* An ash-owned I/O cancellation request; callers must unwind normally. */
+extern volatile sig_atomic_t bb_nofork_signal;
+#else
+# define bb_nofork_signal 0
+#endif
 void run_noexec_applet_and_exit(int a, const char *name, char **argv) NORETURN FAST_FUNC;
 #ifndef BUILD_INDIVIDUAL
 int find_applet_by_name(const char *name) FAST_FUNC;

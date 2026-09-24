@@ -59,6 +59,8 @@ static off_t bb_full_fd_action(int src_fd, int dst_fd, off_t size)
 	while (1) {
 		ssize_t rd;
 
+		if (bb_nofork_signal)
+			break;
 		if (sendfile_sz) {
 			/* dst_fd == -1 is a fake, else... */
 			if (dst_fd >= 0) {
@@ -87,7 +89,8 @@ static off_t bb_full_fd_action(int src_fd, int dst_fd, off_t size)
 		rd = safe_read(src_fd, buffer,
 			size > buffer_size ? buffer_size : size);
 		if (rd < 0) {
-			bb_simple_perror_msg(bb_msg_read_error);
+			if (!bb_nofork_signal)
+				bb_simple_perror_msg(bb_msg_read_error);
 			break;
 		}
  read_ok:
@@ -100,7 +103,9 @@ static off_t bb_full_fd_action(int src_fd, int dst_fd, off_t size)
 			ssize_t wr = full_write(dst_fd, buffer, rd);
 			if (wr < rd) {
 				if (!continue_on_write_error) {
-					bb_simple_perror_msg(bb_msg_write_error);
+					if (!bb_nofork_signal)
+						bb_simple_perror_msg(
+							bb_msg_write_error);
 					break;
 				}
 				dst_fd = -1;

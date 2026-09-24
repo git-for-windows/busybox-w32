@@ -20,6 +20,10 @@
 #define NOFORK_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_NOFORK))
 #define NOEXEC_SUPPORT ((NUM_APPLETS > 1) && (ENABLE_FEATURE_PREFER_APPLETS || ENABLE_FEATURE_SH_STANDALONE))
 
+#if ENABLE_PLATFORM_MINGW32 && ENABLE_FEATURE_SH_NOFORK
+volatile sig_atomic_t bb_nofork_signal;
+#endif
+
 #if defined(__linux__) && (NUM_APPLETS > 1)
 # include <sys/prctl.h>
 # ifndef PR_SET_NAME
@@ -137,6 +141,10 @@ int FAST_FUNC run_nofork_applet(int applet_no, char **argv)
 	} else {
 		/* xfunc died in NOFORK applet */
 	}
+
+	/* Empty cancelled output before restoring the caller's redirections. */
+	if (bb_nofork_signal)
+		fflush(stdout);
 
 	/* Restoring some globals */
 	restore_nofork_data(&old);
