@@ -669,6 +669,7 @@ target:
 # Macros and targets may be mixed on the command line
 testing "make allow mixed macros and targets" \
 	"make -f - FOO=foo foo BAR=bar bar" "foo\nbar\nfoo\nbar\n" "" '
+.PHONY: foo bar
 foo:
 	@echo $(FOO)
 	@echo $(BAR)
