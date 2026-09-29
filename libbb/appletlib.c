@@ -198,6 +198,18 @@ void FAST_FUNC bb_show_usage(void)
 	xfunc_die();
 }
 
+#if ENABLE_PLATFORM_MINGW32 && ENABLE_FEATURE_SH_NOFORK
+int FAST_FUNC applet_can_cancel_io(int applet_no UNUSED_PARAM)
+{
+	return 0
+		IF_CAT(|| applet_no == APPLET_NO_cat)
+		IF_WC(|| applet_no == APPLET_NO_wc)
+		IF_HEAD(|| applet_no == APPLET_NO_head)
+		IF_TR(|| applet_no == APPLET_NO_tr)
+		;
+}
+#endif
+
 #if ENABLE_PLATFORM_MINGW32 && NUM_APPLETS > 1 && \
 		ENABLE_FEATURE_SH_STANDALONE
 static int find_applet_by_name_internal(const char *name)

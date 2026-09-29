@@ -7,12 +7,12 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v6
-    - uses: git-for-windows/setup-git-for-windows-sdk@v1
+    - uses: git-for-windows/setup-git-for-windows-sdk@v2
       with:
         flavor: full
     - name: restrict PATH to Git for Windows' SDK (and Windows)
       shell: bash
-      run: echo 'PATH=/mingw64/bin:/usr/bin/:/c/Windows/system32' >>$GITHUB_ENV
+      run: echo 'PATH=/ucrt64/bin:/usr/bin/:/c/Windows/system32' >>$GITHUB_ENV
     - name: mingw64_defconfig
       shell: bash
       run: |

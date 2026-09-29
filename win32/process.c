@@ -51,6 +51,17 @@ static struct {
 	HANDLE *h;
 } spawned_processes;
 
+#if ENABLE_FEATURE_SH_NOFORK
+static struct {
+	CRITICAL_SECTION mutex;
+	HANDLE thread;
+	DWORD thread_id;
+	ULONGLONG generation;
+	int active;
+	BOOL (WINAPI *cancel)(HANDLE);
+} nofork_io;
+#endif
+
 static int kill_signal_by_handle(HANDLE process, int sig);
 
 static void kill_spawned_processes_on_signal(void)
@@ -125,8 +136,227 @@ static void exit_process_on_signal(HANDLE process)
 void FAST_FUNC initialize_critical_sections(void)
 {
 	InitializeCriticalSection(&spawned_processes.mutex);
+#if ENABLE_FEATURE_SH_NOFORK
+	InitializeCriticalSection(&nofork_io.mutex);
+#endif
 	atexit(kill_spawned_processes_on_signal);
 }
+
+#if ENABLE_FEATURE_SH_NOFORK
+int FAST_FUNC mingw_begin_nofork_io(int applet_no,
+		volatile smallint *pending)
+{
+	DWORD thread_id;
+	DECLARE_PROC_ADDR(BOOL, CancelSynchronousIo, HANDLE);
+
+	if (!pending || !applet_can_cancel_io(applet_no))
+		return 0;
+	thread_id = GetCurrentThreadId();
+	EnterCriticalSection(&nofork_io.mutex);
+	if (nofork_io.active ||
+			(nofork_io.thread &&
+			 nofork_io.thread_id != thread_id)) {
+		errno = EBUSY;
+		goto fail;
+	}
+	if (!nofork_io.thread) {
+		HANDLE thread;
+
+		if (!INIT_PROC_ADDR(kernel32.dll, CancelSynchronousIo))
+			goto fail;
+		if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+				GetCurrentProcess(), &thread,
+				THREAD_TERMINATE, FALSE, 0)) {
+			errno = err_win_to_posix();
+			goto fail;
+		}
+		/* Console callbacks can use this handle until process exit. */
+		nofork_io.thread = thread;
+		nofork_io.thread_id = thread_id;
+		nofork_io.cancel = CancelSynchronousIo;
+	}
+	nofork_io.generation++;
+	nofork_io.active = 1;
+	InterlockedExchange(&bb_nofork_signal, *pending ? SIGINT : 0);
+	LeaveCriticalSection(&nofork_io.mutex);
+	return 1;
+
+ fail:
+	LeaveCriticalSection(&nofork_io.mutex);
+	return -1;
+}
+
+int FAST_FUNC mingw_end_nofork_io(void)
+{
+	int signal;
+
+	EnterCriticalSection(&nofork_io.mutex);
+	signal = bb_nofork_signal;
+	nofork_io.active = 0;
+	InterlockedExchange(&bb_nofork_signal, 0);
+	LeaveCriticalSection(&nofork_io.mutex);
+	return signal;
+}
+
+int FAST_FUNC mingw_cancel_nofork_io(volatile smallint *pending)
+{
+	ULONGLONG generation;
+
+	EnterCriticalSection(&nofork_io.mutex);
+	/* Publish the event and select its scope together: the caller must
+	 * not consume the event and start another scope between these. */
+	*pending = 1;
+	if (!nofork_io.active) {
+		LeaveCriticalSection(&nofork_io.mutex);
+		return 0;
+	}
+	generation = nofork_io.generation;
+	InterlockedExchange(&bb_nofork_signal, SIGINT);
+	while (nofork_io.active && nofork_io.generation == generation) {
+		/* Keep scope completion from racing with this request. */
+		if (!nofork_io.cancel(nofork_io.thread)) {
+			DWORD error = GetLastError();
+
+			if (error != ERROR_NOT_FOUND) {
+				LeaveCriticalSection(&nofork_io.mutex);
+				SetLastError(error);
+				return -1;
+			}
+		}
+		LeaveCriticalSection(&nofork_io.mutex);
+		/* A request may arrive just before the read or write starts. */
+		Sleep(1);
+		EnterCriticalSection(&nofork_io.mutex);
+	}
+	LeaveCriticalSection(&nofork_io.mutex);
+	return 0;
+}
+#endif
+
+#if defined(_UCRT)
+static const wchar_t *
+find_environment_entry(const wchar_t *block,
+		const wchar_t *name, size_t name_len)
+{
+	const wchar_t *entry;
+
+	for (entry = block; *entry; entry += wcslen(entry) + 1) {
+		if (entry[0] != '=' &&
+				_wcsnicmp(entry, name, name_len) == 0 &&
+				entry[name_len] == '=')
+			return entry;
+	}
+	return NULL;
+}
+
+static const wchar_t *
+find_wenv_entry(wchar_t **wenv, const wchar_t *name, size_t name_len)
+{
+	int i;
+
+	for (i = 0; wenv[i]; i++) {
+		if (wenv[i][0] != '=' &&
+				_wcsnicmp(wenv[i], name, name_len) == 0 &&
+				wenv[i][name_len] == '=')
+			return wenv[i];
+	}
+	return NULL;
+}
+
+static int
+set_environment_entry(const wchar_t *entry)
+{
+	const wchar_t *equals;
+	wchar_t *name;
+	size_t name_len;
+
+	if (entry[0] == '=')
+		return 0;
+	equals = wcschr(entry, '=');
+	if (!equals)
+		return 0;
+	name_len = equals - entry;
+	name = alloca((name_len + 1) * sizeof(*name));
+	memcpy(name, entry, name_len * sizeof(*name));
+	name[name_len] = L'\0';
+	return SetEnvironmentVariableW(name, equals + 1) ? 0 : -1;
+}
+
+static int
+delete_environment_entry(const wchar_t *entry)
+{
+	const wchar_t *equals;
+	wchar_t *name;
+	size_t name_len;
+
+	if (entry[0] == '=')
+		return 0;
+	equals = wcschr(entry, '=');
+	if (!equals)
+		return 0;
+	name_len = equals - entry;
+	name = alloca((name_len + 1) * sizeof(*name));
+	memcpy(name, entry, name_len * sizeof(*name));
+	name[name_len] = L'\0';
+	return SetEnvironmentVariableW(name, NULL) ? 0 : -1;
+}
+
+static int
+install_spawn_environment(wchar_t **wenv, const wchar_t *old_environment)
+{
+	const wchar_t *entry;
+	int i;
+
+	for (entry = old_environment; *entry; entry += wcslen(entry) + 1) {
+		const wchar_t *equals;
+
+		if (entry[0] == '=')
+			continue;
+		equals = wcschr(entry, '=');
+		if (equals && !find_wenv_entry(wenv, entry, equals - entry) &&
+				delete_environment_entry(entry) < 0)
+			return -1;
+	}
+	for (i = 0; wenv[i]; i++) {
+		const wchar_t *equals;
+		const wchar_t *old_entry;
+
+		if (wenv[i][0] == '=')
+			continue;
+		equals = wcschr(wenv[i], '=');
+		if (!equals)
+			continue;
+		old_entry = find_environment_entry(old_environment,
+				wenv[i], equals - wenv[i]);
+		if ((!old_entry || wcscmp(old_entry, wenv[i]) != 0) &&
+				set_environment_entry(wenv[i]) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int
+restore_spawn_environment(wchar_t **wenv, const wchar_t *old_environment)
+{
+	const wchar_t *entry;
+	int i;
+	int ret = 0;
+
+	for (i = 0; wenv[i]; i++) {
+		const wchar_t *equals;
+
+		if (wenv[i][0] == '=')
+			continue;
+		equals = wcschr(wenv[i], '=');
+		if (equals && !find_environment_entry(old_environment,
+					wenv[i], equals - wenv[i]))
+			ret |= delete_environment_entry(wenv[i]);
+	}
+	for (entry = old_environment; *entry; entry += wcslen(entry) + 1)
+		ret |= set_environment_entry(entry);
+	return ret;
+}
+#endif
 
 static intptr_t mingw_spawnve(int mode,
 		const char *cmd, char *const *argv, char *const *env)
@@ -166,12 +396,60 @@ static intptr_t mingw_spawnve(int mode,
 	 * We cannot use _P_WAIT here because we need to kill spawned processes
 	 * if we're killed, and _P_WAIT does not let us.
 	 */
+#if defined(_UCRT)
+	if (wenv) {
+		wchar_t *old_environment;
+		DWORD environment_error;
+		int restore_failed;
+
+		/*
+		 * All callers that pass envp must have interrupts disabled.
+		 * Console control handlers run on a separate thread; allowing
+		 * one to exit midway through this temporary process-wide
+		 * environment change would leave the parent corrupted.
+		 */
+		EnterCriticalSection(&spawned_processes.mutex);
+		old_environment = GetEnvironmentStringsW();
+		if (!old_environment ||
+				install_spawn_environment(wenv,
+					old_environment) < 0) {
+			environment_error = GetLastError();
+			restore_failed = 0;
+			if (old_environment) {
+				restore_failed = restore_spawn_environment(wenv,
+					old_environment);
+				FreeEnvironmentStringsW(old_environment);
+			}
+			LeaveCriticalSection(&spawned_processes.mutex);
+			if (restore_failed)
+				abort();
+			if (!environment_error)
+				environment_error = ERROR_NOT_ENOUGH_MEMORY;
+			SetLastError(environment_error);
+			errno = err_win_to_posix();
+			ret = -1;
+			goto done;
+		}
+		ret = _wspawnve(_P_NOWAIT,
+			wcmd + (wcsncmp(wcmd, L"\\\\?\\", 4) ? 0 : 4),
+			(const wchar_t *const *)wargv, NULL);
+		restore_failed = restore_spawn_environment(wenv,
+				old_environment);
+		FreeEnvironmentStringsW(old_environment);
+		LeaveCriticalSection(&spawned_processes.mutex);
+		if (restore_failed)
+			abort();
+	} else
+#endif
 	ret = _wspawnve(_P_NOWAIT, wcmd + (wcsncmp(wcmd, L"\\\\?\\", 4) ? 0 : 4),
 		(const wchar_t *const *)wargv, (const wchar_t *const *)wenv);
 
 	if (ret != (intptr_t)-1)
 		exit_process_on_signal((HANDLE)ret);
 
+#if defined(_UCRT)
+ done:
+#endif
 	free(wargv);
 	free(wenv);
 
@@ -371,6 +649,31 @@ find_first_executable(const char *name)
 	return find_executable(name, &path);
 }
 
+/*
+ * Like find_first_executable(), but searches the PATH given by envp
+ * (the environment about to be handed to the spawned process) rather
+ * than this process's own environment. The two can differ, e.g. when
+ * a shell exports a PATH that hasn't been applied with putenv()/
+ * SetEnvironmentVariable() to the running busybox.exe itself.
+ */
+static char *
+find_first_executable_env(const char *name, char *const *envp)
+{
+	const char *path = NULL;
+	int i;
+
+	if (envp) {
+		for (i = 0; envp[i]; i++) {
+			if (_strnicmp(envp[i], "PATH=", 5) == 0) {
+				path = envp[i] + 5;
+				break;
+			}
+		}
+	} else
+		path = getenv("PATH");
+	return find_executable(name, &path);
+}
+
 static inline int is_slash(char c)
 {
 	return c == '/' || c == '\\';
@@ -546,7 +849,7 @@ create_detached_process(const char *prog, char *const *argv)
 # define SPAWNVEQ(m, p, a, e) spawnveq(m, p, a, e)
 #endif
 
-static intptr_t
+intptr_t FAST_FUNC
 mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 			char *const *envp, int level)
 {
@@ -556,6 +859,31 @@ mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 	char **new_argv;
 	char *path = NULL;
 	int is_unix_path;
+	int i;
+
+	/*
+	 * MSYS2 provides /usr/bin/cmd as a Bash wrapper around COMSPEC.
+	 * Real Bash rewrites cmd.exe-style options such as "/w" into MSYS
+	 * paths.  BusyBox used to avoid that accidentally through its
+	 * misleading bash-is-ash alias.  Invoke COMSPEC directly instead:
+	 * this is both faster and preserves cmd.exe argv semantics.
+	 */
+	if (is_msys2_cmd(prog) &&
+			strcasecmp(bb_basename(prog), "cmd") == 0) {
+		const char *comspec = NULL;
+
+		if (envp) {
+			for (i = 0; envp[i]; i++) {
+				if (_strnicmp(envp[i], "COMSPEC=", 8) == 0) {
+					comspec = envp[i] + 8;
+					break;
+				}
+			}
+		} else
+			comspec = getenv("COMSPEC");
+		if (comspec && *comspec)
+			prog = comspec;
+	}
 
 	if (!parse_interpreter(prog, &interp))
 		return SPAWNVEQ(mode, prog, argv, envp);
@@ -582,7 +910,7 @@ mingw_spawn_interpreter(int mode, const char *prog, char *const *argv,
 
 	path = file_is_win32_exe(interp.path);
 	if (!path && is_unix_path)
-		path = find_first_executable(interp.name);
+		path = find_first_executable_env(interp.name, envp);
 
 	if (path) {
 		new_argv[0] = path;

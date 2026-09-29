@@ -17,6 +17,10 @@ int FAST_FUNC bb_cat(char **argv)
 		argv = (char**) &bb_argv_dash;
 
 	do {
+		if (bb_nofork_signal) {
+			retval = EXIT_FAILURE;
+			break;
+		}
 		fd = open_or_warn_stdin(*argv);
 		if (fd >= 0) {
 			/* This is not a xfunc - never exits */
@@ -29,5 +33,5 @@ int FAST_FUNC bb_cat(char **argv)
 		retval = EXIT_FAILURE;
 	} while (*++argv);
 
-	return retval;
+	return bb_nofork_signal ? 128 + bb_nofork_signal : retval;
 }

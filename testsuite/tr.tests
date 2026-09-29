@@ -38,4 +38,13 @@ testing "tr has correct xdigit sequence" \
 	"#0123456789ABCDEFGabcdefg\n"
 SKIP=
 
+optional PLATFORM_MINGW32 FEATURE_PREFER_APPLETS XARGS \
+	FEATURE_XARGS_SUPPORT_ARGS_FILE FEATURE_XARGS_SUPPORT_REPL_STR \
+	FEATURE_TR_EQUIV
+testing "tr keeps xargs arguments unchanged" \
+	"xargs -a input -t -I% tr '\\0' % 2>&1 | \
+	grep -F -c 'tr \\0 abc'" \
+	"1\n" "[=x\nabc\n" ""
+SKIP=
+
 exit $FAILCOUNT

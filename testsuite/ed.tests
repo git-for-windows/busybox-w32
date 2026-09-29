@@ -19,3 +19,5 @@ testing "ed read text before current line" \
 w
 q
 '
+
+exit $FAILCOUNT

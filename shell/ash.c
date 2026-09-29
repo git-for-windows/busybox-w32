@@ -677,6 +677,8 @@ struct globals_misc {
 	volatile /*sig_atomic_t*/ smallint pending_sig;	/* last pending signal */
 #else
 	volatile /*sig_atomic_t*/ smallint waitcmd_int;	/* SIGINT in wait */
+	/* Trapped SIGINT, independent of the wait builtin. */
+	volatile /*sig_atomic_t*/ smallint pending_trap;
 #endif
 	smallint exception_type; /* kind of exception: */
 #define EXINT 0         /* SIGINT received */
@@ -802,6 +804,7 @@ extern struct globals_misc *BB_GLOBAL_CONST ash_ptr_to_globals_misc;
 #define pending_int       (G_misc.pending_int      )
 #if ENABLE_PLATFORM_MINGW32
 #define waitcmd_int       (G_misc.waitcmd_int      )
+#define pending_trap      (G_misc.pending_trap     )
 #endif
 #define gotsigchld        (G_misc.gotsigchld       )
 #define pending_sig       (G_misc.pending_sig      )
@@ -4889,6 +4892,8 @@ sprint_status48(char *os, int status, int sigonly)
 static BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 {
 	if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT) {
+		volatile smallint *pending;
+
 # if ENABLE_FEATURE_EDITING
 		bb_got_signal = SIGINT; /* for read_line_input: "we got a signal" */
 # endif
@@ -4896,8 +4901,24 @@ static BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 		if (!trap[SIGINT]) {
 			if (!suppress_int && !(rootshell && iflag))
 				raise_interrupt();
-			pending_int = 1;
+			pending = &pending_int;
+		} else {
+			pending = &pending_trap;
 		}
+# if ENABLE_FEATURE_SH_NOFORK
+		if (mingw_cancel_nofork_io(pending) < 0) {
+			static const char message[] =
+				"ash: cannot cancel in-process I/O\n";
+			DWORD written;
+
+			/* The main thread may hold a stdio lock. */
+			if (!WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
+					sizeof(message) - 1, &written, NULL))
+				OutputDebugStringA(message);
+		}
+# else
+		*pending = 1;
+# endif
 		return TRUE;
 	}
 	return FALSE;
@@ -4952,7 +4973,6 @@ waitpid_child(int *status, DWORD blocking)
 					GetExitCodeProcess(proclist[idx], &win_status);
 					*status = exit_code_to_wait_status(win_status);
 					pid = GetProcessId(proclist[idx]);
-					CloseHandle(proclist[idx]);
 					break;
 				}
 			}
@@ -6616,6 +6636,7 @@ save_fd_on_redirect(int fd, int avoid_fd, struct redirtab *sq)
 			 */
 			if (fd == pf->pf_fd) {
 				pf->pf_fd = xdup_CLOEXEC_and_close(fd, avoid_fd);
+				add_squirrel_closed(sq, fd);
 				return 1; /* "we closed fd" */
 			}
 			pf = pf->prev;
@@ -6989,6 +7010,7 @@ tryexec(const char *cmd, const char *path, int noexec, char **argv, char **envp)
 #if ENABLE_FEATURE_SH_STANDALONE
     interp_t interp;
 #endif
+	const char *comspec;
 
 	/* Workaround for libtool, which assumes the host is an MSYS2
 	 * environment and requires special-case escaping for cmd.exe.
@@ -7000,8 +7022,19 @@ tryexec(const char *cmd, const char *path, int noexec, char **argv, char **envp)
 		argv[1]++;	/* drop extra slash */
 	}
 
-	/* cmd was allocated on the stack with room for an extension */
-	add_win32_extension((char *)cmd);
+	/*
+	 * /usr/bin/cmd is an MSYS2 Bash wrapper around COMSPEC.  Invoking
+	 * that wrapper from real Bash rewrites cmd.exe-style options such as
+	 * "/w" into MSYS paths.  Use COMSPEC directly instead.
+	 */
+	comspec = lookupvar("COMSPEC");
+	if (comspec && *comspec &&
+			(is_suffixed_with_case(cmd, "/usr/bin/cmd") ||
+			 is_suffixed_with_case(cmd, "\\usr\\bin\\cmd")))
+		cmd = comspec;
+	else
+		/* cmd was allocated on the stack with room for an extension */
+		add_win32_extension((char *)cmd);
 
 # if ENABLE_FEATURE_SH_STANDALONE
 	/* If the command is a script with an interpreter which is an
@@ -7819,6 +7852,39 @@ evaltreenr(union node *n, int flags)
 	/* NOTREACHED */
 }
 
+#if ENABLE_PLATFORM_MINGW32
+static int try_spawn_simple_command(union node *n, struct job *jp,
+		int prevfd, int pipe_read, int pipe_write, int mode);
+
+static int
+try_spawn_backcmd(union node *n, struct job *jp,
+		int pipe_read, int pipe_write)
+{
+	struct nodelist *saved_argbackq = argbackq;
+	char *saved_expdest = expdest;
+	struct ifsregion saved_ifsfirst = ifsfirst;
+	struct ifsregion *saved_ifslastp = ifslastp;
+	struct arglist saved_exparg = exparg;
+	int saved_lineno = lineno;
+	int saved_errlinno = errlinno;
+	int handled;
+
+	memset(&ifsfirst, 0, sizeof(ifsfirst));
+	ifslastp = NULL;
+	handled = try_spawn_simple_command(n, jp, -1,
+			pipe_read, pipe_write, FORK_NOJOB);
+	ifsfree();
+	argbackq = saved_argbackq;
+	expdest = saved_expdest;
+	ifsfirst = saved_ifsfirst;
+	ifslastp = saved_ifslastp;
+	exparg = saved_exparg;
+	lineno = saved_lineno;
+	errlinno = saved_errlinno;
+	return handled;
+}
+#endif
+
 static void FAST_FUNC
 evalbackcmd(union node *n, struct backcmd *result
 				IF_BASH_PROCESS_SUBST(, int ctl))
@@ -7849,13 +7915,16 @@ evalbackcmd(union node *n, struct backcmd *result
 	/* process substitution uses NULL job, like openhere() */
 	jp = (ctl == CTLBACKQ) ? makejob(1) : NULL;
 #if ENABLE_PLATFORM_MINGW32
-	memset(&fs, 0, sizeof(fs));
-	fs.fpid = FS_EVALBACKCMD;
-	fs.n = n;
-	fs.fd[0] = pip[0];
-	fs.fd[1] = pip[1];
-	fs.fd[2] = ctl;
-	spawn_forkshell(&fs, jp, n, FORK_NOJOB);
+	if (ctl != CTLBACKQ ||
+			!try_spawn_backcmd(n, jp, pip[ip], pip[ic])) {
+		memset(&fs, 0, sizeof(fs));
+		fs.fpid = FS_EVALBACKCMD;
+		fs.n = n;
+		fs.fd[0] = pip[0];
+		fs.fd[1] = pip[1];
+		fs.fd[2] = ctl;
+		spawn_forkshell(&fs, jp, n, FORK_NOJOB);
+	}
 #else
 	if (forkshell(jp, n, FORK_NOJOB) == 0) {
 		/* child */
@@ -10837,10 +10906,12 @@ dotrap(void)
 	int status, last_status;
 	char *p;
 
-	if (!pending_int && waitcmd_int != 1) {
+	if (!pending_int && !pending_trap && waitcmd_int != 1) {
 		waitcmd_int = 0;
 		return;
 	}
+	if (evalskip)
+		return;
 
 	status = savestatus;
 	last_status = status;
@@ -10848,15 +10919,10 @@ dotrap(void)
 		status = exitstatus;
 		savestatus = status;
 	}
-	pending_int = waitcmd_int = 0;
+	pending_int = waitcmd_int = pending_trap = 0;
 	barrier();
 
 	TRACE(("dotrap entered\n"));
-	if (evalskip) {
-		pending_int = 1;
-		return;
-	}
-
 	p = trap[SIGINT];
 	if (p) {
 		TRACE(("sig %d is active, will run handler '%s'\n", SIGINT, p));
@@ -11304,6 +11370,444 @@ expredir(union node *n)
 	}
 }
 
+#if ENABLE_PLATFORM_MINGW32
+static intptr_t
+mingw_spawn_shell_command(char **argv, const char *path, int idx, char **envp)
+{
+	if (idx < -1) {
+		/* Only in-process which receives the "Which" marker. */
+		if (strcmp(argv[0], "which") == 0)
+			return -1;
+		return mingw_spawn_applet(P_NOWAIT,
+				(char *const *)argv, envp);
+	}
+	if (idx >= 0) {
+		const char *walk = path;
+		char *resolved = NULL;
+
+		while (padvance(&walk, argv[0]) >= 0) {
+			if (idx-- == 0) {
+				resolved = stackblock();
+				/* Match find_command()'s suffix lookup. */
+				add_win32_extension(resolved);
+				break;
+			}
+		}
+		return resolved
+			? mingw_spawn_interpreter(P_NOWAIT, resolved,
+					(char *const *)argv, envp, 0)
+			: -1;
+	}
+
+	/* idx == -1: the command name contains a slash. */
+	{
+		char *resolved = alloc_ext_space(argv[0]);
+		intptr_t ret;
+
+		add_win32_extension(resolved);
+		ret = mingw_spawn_interpreter(P_NOWAIT, resolved,
+				(char *const *)argv, envp, 0);
+		free(resolved);
+		return ret;
+	}
+}
+
+/*
+ * Parent-side pipeline expansion must not leak arithmetic side effects or
+ * errors. Accept only bounded decimal addition and subtraction over ordinary
+ * integer variables; everything else retains forkshell evaluation.
+ */
+static int
+pipeline_arithmetic_var_is_integer(const char *name, size_t len,
+		int require_set)
+{
+	char varname[64];
+	const unsigned char *digits;
+	const unsigned char *value;
+	struct var *vp;
+
+	if (len + 2 > sizeof(varname))
+		return 0;
+	memcpy(varname, name, len);
+	varname[len] = '=';
+	varname[len + 1] = '\0';
+
+	vp = *findvar(varname);
+	if (vp == NULL || (vp->flags & VUNSET))
+		return !require_set;
+	if (vp->flags & VDYNAMIC)
+		return 0;
+
+	value = (const unsigned char *)var_end(vp->var_text);
+	if (*value == '+' || *value == '-') {
+		if (require_set)
+			return 0;
+		value++;
+	}
+	digits = value;
+	if (!isdigit(*value))
+		return 0;
+	do {
+		value++;
+	} while (isdigit(*value));
+	return *value == '\0' &&
+		(value - digits == 1 || *digits != '0') &&
+		value - digits <= (int)sizeof(arith_t) * 2;
+}
+
+static const unsigned char *
+pipeline_arithmetic_skip_space(const unsigned char *p)
+{
+	while (isspace(*p))
+		p++;
+	return p;
+}
+
+static const unsigned char *pipeline_arithmetic_expr(
+		const unsigned char *p);
+
+static const unsigned char *
+pipeline_arithmetic_primary(const unsigned char *p)
+{
+	const unsigned char *end;
+
+	p = pipeline_arithmetic_skip_space(p);
+	if (*p == '(') {
+		p = pipeline_arithmetic_expr(p + 1);
+		if (p == NULL)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p);
+		return *p == ')' ? p + 1 : NULL;
+	}
+	if (isdigit(*p)) {
+		end = p;
+		do {
+			end++;
+		} while (isdigit(*end));
+		if ((end - p > 1 && *p == '0') ||
+				end - p > (int)sizeof(arith_t) * 2)
+			return NULL;
+		return end;
+	}
+	if (is_name(*p)) {
+		end = p + 1;
+		while (is_in_name(*end))
+			end++;
+		return pipeline_arithmetic_var_is_integer(
+				(const char *)p, end - p, 0) ? end : NULL;
+	}
+	if (*p == CTLVAR) {
+		int subtype = p[1] & VSTYPE;
+
+		p += 2;
+		end = (const unsigned char *)strchr((const char *)p, '=');
+		if (subtype != VSNORMAL || end == NULL ||
+				!pipeline_arithmetic_var_is_integer(
+					(const char *)p, end - p, 1))
+			return NULL;
+		return end + 1;
+	}
+	return NULL;
+}
+
+static const unsigned char *
+pipeline_arithmetic_factor(const unsigned char *p)
+{
+	p = pipeline_arithmetic_skip_space(p);
+	while (*p == '+' || *p == '-') {
+		if (p[1] == *p)
+			return NULL;
+		p = pipeline_arithmetic_skip_space(p + 1);
+	}
+	return pipeline_arithmetic_primary(p);
+}
+
+static const unsigned char *
+pipeline_arithmetic_expr(const unsigned char *p)
+{
+	const unsigned char *next;
+	unsigned char op;
+
+	p = pipeline_arithmetic_factor(p);
+	if (p == NULL)
+		return NULL;
+	for (;;) {
+		p = pipeline_arithmetic_skip_space(p);
+		op = *p;
+		if (op != '+' && op != '-')
+			return p;
+		if (p[1] == op)
+			return NULL;
+		next = pipeline_arithmetic_factor(p + 1);
+		if (next == NULL)
+			return NULL;
+		p = next;
+	}
+}
+
+static const unsigned char *
+pipeline_arithmetic_is_safe(const unsigned char *p)
+{
+	if (uflag)
+		return NULL;
+	p = pipeline_arithmetic_expr(p);
+	if (p == NULL)
+		return NULL;
+	p = pipeline_arithmetic_skip_space(p);
+	return *p == CTLENDARI ? p : NULL;
+}
+
+static int
+pipeline_word_is_safe_to_expand(union node *arg)
+{
+	const unsigned char *p;
+
+	if (arg->narg.backquote)
+		return 0;
+
+	for (p = (const unsigned char *)arg->narg.text; *p; p++) {
+		switch (*p) {
+		case CTLESC:
+			if (*++p == '\0')
+				return 0;
+			break;
+		case CTLQUOTEMARK:
+		case CTLENDVAR:
+			break;
+		case CTLVAR: {
+			struct var *vp;
+			int subtype = p[1] & VSTYPE;
+
+			if (uflag ||
+					(subtype != VSNORMAL &&
+					 subtype != VSLENGTH))
+				return 0;
+			vp = *findvar((const char *)p + 2);
+			if (vp && (vp->flags & VDYNAMIC))
+				return 0;
+			break;
+		}
+		case CTLARI:
+			p = pipeline_arithmetic_is_safe(p + 1);
+			if (p == NULL)
+				return 0;
+			break;
+		case CTLBACKQ:
+		case CTLENDARI:
+# if BASH_PROCESS_SUBST
+		case CTLTOPROC:
+		case CTLFROMPROC:
+# endif
+			return 0;
+		default:
+			break;
+		}
+	}
+	return 1;
+}
+
+static int
+set_fd_inherit(int fd, int inherit, DWORD *old_flags)
+{
+	HANDLE h;
+
+	if (fd < 0)
+		return 0;
+
+	h = (HANDLE)_get_osfhandle(fd);
+	if (h == INVALID_HANDLE_VALUE ||
+			!GetHandleInformation(h, old_flags) ||
+			!SetHandleInformation(h, HANDLE_FLAG_INHERIT,
+				inherit ? HANDLE_FLAG_INHERIT : 0))
+		return -1;
+	return 0;
+}
+
+static void
+restore_fd_inherit(int fd, DWORD old_flags)
+{
+	HANDLE h;
+
+	if (fd < 0)
+		return;
+	h = (HANDLE)_get_osfhandle(fd);
+	if (h != INVALID_HANDLE_VALUE)
+		SetHandleInformation(h, HANDLE_FLAG_INHERIT,
+				old_flags & HANDLE_FLAG_INHERIT);
+}
+
+static void
+restore_standard_fd(int fd, int saved)
+{
+	if (saved >= 0) {
+		dup2(saved, fd);
+		close(saved);
+	} else {
+		close(fd);
+	}
+}
+
+/*
+ * Directly spawn a simple command when expanding it in the parent cannot
+ * affect shell state: no assignments or command-local redirections, and no
+ * state-changing expansions. Leave tracing to the evaluator because PS4
+ * expansion can change shell state.
+ */
+static int
+try_spawn_simple_command(union node *n, struct job *jp,
+		int prevfd, int pipe_read, int pipe_write, int mode)
+{
+	struct stackmark smark;
+	struct cmdentry entry;
+	union node *arg;
+	struct arglist arglist;
+	struct strlist *sp;
+	char **argv;
+	char **envp;
+	const char *path;
+	int argc;
+	int i;
+	int saved_stdin = -1;
+	int saved_stdout = -1;
+	int stdin_swapped = 0;
+	int stdout_swapped = 0;
+	DWORD ignored_flags = 0;
+	DWORD prevfd_flags = 0;
+	DWORD pipe_read_flags = 0;
+	DWORD pipe_write_flags = 0;
+	int prevfd_marked = 0;
+	int pipe_read_marked = 0;
+	int pipe_write_marked = 0;
+	intptr_t spawn_ret = -1;
+	HANDLE proc;
+	int handled = 0;
+
+	if (xflag || n->type != NCMD || n->ncmd.assign ||
+			n->ncmd.redirect || !n->ncmd.args)
+		return 0;
+	/* Standard fds reused for pipes need the evaluator's fd handling. */
+	if ((prevfd >= 0 && prevfd <= STDOUT_FILENO) ||
+			(pipe_read >= 0 && pipe_read <= STDOUT_FILENO) ||
+			(pipe_write >= 0 && pipe_write <= STDOUT_FILENO))
+		return 0;
+
+	errlinno = lineno = n->ncmd.linno;
+
+	argc = 0;
+	for (arg = n->ncmd.args; arg; arg = arg->narg.next) {
+		if (arg->type != NARG ||
+				!pipeline_word_is_safe_to_expand(arg))
+			return 0;
+	}
+
+	setstackmark(&smark);
+	arglist.lastp = &arglist.list;
+	*arglist.lastp = NULL;
+	for (arg = n->ncmd.args; arg; arg = arg->narg.next) {
+		expandarg(arg, &arglist, EXP_FULL | EXP_TILDE);
+	}
+	for (sp = arglist.list; sp; sp = sp->next)
+		argc++;
+	argv = stalloc(sizeof(*argv) * (argc + 1));
+	i = 0;
+	for (sp = arglist.list; sp; sp = sp->next)
+		argv[i++] = sp->text;
+	argv[i] = NULL;
+
+	if (argc == 0)
+		goto out;
+
+	path = pathval();
+	find_command(argv[0], &entry, 0, path);
+	if (entry.cmdtype != CMDNORMAL)
+		goto out;
+
+	envp = listvars(VEXPORT, VUNSET, /*strlist:*/ NULL,
+			/*end:*/ NULL);
+
+	if (prevfd > 0) {
+		saved_stdin = dup(0);
+		if (saved_stdin < 0 && errno != EBADF)
+			goto restore;
+		if (saved_stdin >= 0 &&
+				set_fd_inherit(saved_stdin, 0,
+					&ignored_flags) < 0)
+			goto restore;
+		if (dup2(prevfd, 0) < 0)
+			goto restore;
+		stdin_swapped = 1;
+		if (set_fd_inherit(0, 1, &ignored_flags) < 0)
+			goto restore;
+	}
+	if (pipe_write > 1) {
+		saved_stdout = dup(1);
+		if (saved_stdout < 0 && errno != EBADF)
+			goto restore;
+		if (saved_stdout >= 0 &&
+				set_fd_inherit(saved_stdout, 0,
+					&ignored_flags) < 0)
+			goto restore;
+		if (dup2(pipe_write, 1) < 0)
+			goto restore;
+		stdout_swapped = 1;
+		if (set_fd_inherit(1, 1, &ignored_flags) < 0)
+			goto restore;
+	}
+
+	if (prevfd > 1) {
+		if (set_fd_inherit(prevfd, 0, &prevfd_flags) < 0)
+			goto restore;
+		prevfd_marked = 1;
+	}
+	if (pipe_read > 1) {
+		if (set_fd_inherit(pipe_read, 0, &pipe_read_flags) < 0)
+			goto restore;
+		pipe_read_marked = 1;
+	}
+	if (pipe_write > 1) {
+		if (set_fd_inherit(pipe_write, 0, &pipe_write_flags) < 0)
+			goto restore;
+		pipe_write_marked = 1;
+	}
+
+	spawn_ret = mingw_spawn_shell_command(argv, path,
+			entry.u.index, envp);
+
+ restore:
+	if (pipe_write_marked)
+		restore_fd_inherit(pipe_write, pipe_write_flags);
+	if (pipe_read_marked)
+		restore_fd_inherit(pipe_read, pipe_read_flags);
+	if (prevfd_marked)
+		restore_fd_inherit(prevfd, prevfd_flags);
+	if (stdout_swapped)
+		restore_standard_fd(1, saved_stdout);
+	else if (saved_stdout >= 0)
+		close(saved_stdout);
+	if (stdin_swapped)
+		restore_standard_fd(0, saved_stdin);
+	else if (saved_stdin >= 0)
+		close(saved_stdin);
+
+	if (spawn_ret != -1 && spawn_ret != 0) {
+		HANDLE self = GetCurrentProcess();
+
+		if (!DuplicateHandle(self, (HANDLE)spawn_ret, self, &proc,
+				0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			CloseHandle((HANDLE)spawn_ret);
+			ash_msg_and_raise_error(
+					"cannot duplicate process handle");
+		}
+		forkparent(jp, n, mode, proc);
+		handled = 1;
+	}
+
+ out:
+	popstackmark(&smark);
+	return handled;
+}
+#endif
+
 /*
  * Evaluate a pipeline.  All the processes in the pipeline are children
  * of the process creating the pipeline.  (This differs from some versions
@@ -11333,6 +11837,7 @@ evalpipe(union node *n, int flags)
 	prevfd = -1;
 	for (lp = n->npipe.cmdlist; lp; lp = lp->next) {
 		prehash(lp->n);
+		pip[0] = -1;
 		pip[1] = -1;
 		if (lp->next) {
 			if (pipe(pip) < 0) {
@@ -11341,14 +11846,20 @@ evalpipe(union node *n, int flags)
 			}
 		}
 #if ENABLE_PLATFORM_MINGW32
-		memset(&fs, 0, sizeof(fs));
-		fs.fpid = FS_EVALPIPE;
-		fs.flags = flags;
-		fs.n = lp->n;
-		fs.fd[0] = pip[0];
-		fs.fd[1] = pip[1];
-		fs.fd[2] = prevfd;
-		spawn_forkshell(&fs, jp, lp->n, n->npipe.pipe_backgnd);
+		if (n->npipe.pipe_backgnd IF_SUW32(|| delayexit) ||
+				!try_spawn_simple_command(lp->n, jp,
+					prevfd, pip[0], pip[1],
+					n->npipe.pipe_backgnd)) {
+			memset(&fs, 0, sizeof(fs));
+			fs.fpid = FS_EVALPIPE;
+			fs.flags = flags;
+			fs.n = lp->n;
+			fs.fd[0] = pip[0];
+			fs.fd[1] = pip[1];
+			fs.fd[2] = prevfd;
+			spawn_forkshell(&fs, jp, lp->n,
+					n->npipe.pipe_backgnd);
+		}
 #else
 		if (forkshell(jp, lp->n, n->npipe.pipe_backgnd) == 0) {
 			/* child */
@@ -12452,40 +12963,48 @@ evalcommand(union node *cmd, int flags)
 			char **sv_environ;
 #if ENABLE_PLATFORM_MINGW32
 			char *sv_argv0;
+			int io_scope, io_signal = 0;
+			volatile smallint *pending = trap[SIGINT]
+				? (trap[SIGINT][0] ? &pending_trap : NULL)
+				: &pending_int;
 #endif
 
 			INTOFF;
 			sv_environ = environ;
 			environ = listvars(VEXPORT, VUNSET, varlist.list, /*end:*/ NULL);
-			/*
-			 * Run <applet>_main().
-			 * Signals (^C) can't interrupt here.
-			 * Otherwise we can mangle stdio or malloc internal state.
-			 * This makes applets which can run for a long time
-			 * and/or wait for user input ineligible for NOFORK:
-			 * for example, "yes" or "rm" (rm -i waits for input).
-			 */
+			/* Defer exceptions until applet cleanup. */
 #if ENABLE_PLATFORM_MINGW32
-			sv_argv0 = __argv[0];
-			argv[0] = (char *)bb_basename(argv[0]);
-			__argv[0] = argv[0];
+			io_scope = mingw_begin_nofork_io(applet_no, pending);
+			if (io_scope >= 0) {
+				sv_argv0 = __argv[0];
+				argv[0] = (char *)bb_basename(argv[0]);
+				__argv[0] = argv[0];
+				if (bb_nofork_signal)
+					exitstatus = 128 + bb_nofork_signal;
+				else
 #endif
-			exitstatus = run_nofork_applet(applet_no, argv);
+					exitstatus = run_nofork_applet(
+							applet_no, argv);
+#if ENABLE_PLATFORM_MINGW32
+				__argv[0] = sv_argv0;
+			}
+#endif
 			environ = sv_environ;
 #if ENABLE_PLATFORM_MINGW32
-			__argv[0] = sv_argv0;
+			if (io_scope > 0)
+				io_signal = mingw_end_nofork_io();
+			if (io_signal) {
+				clearerr(stdin);
+				clearerr(stdout);
+				clearerr(stderr);
+				exitstatus = 128 + io_signal;
+			}
 #endif
-			/*
-			 * Try enabling NOFORK for "yes" applet.
-			 * ^C _will_ stop it (write returns EINTR),
-			 * but this causes stdout FILE to be stuck
-			 * and needing clearerr(). What if other applets
-			 * also can get EINTRs? Do we need to switch
-			 * our signals to SA_RESTART?
-			 */
-			/*clearerr(stdout);*/
 			INTON;
-			break;
+#if ENABLE_PLATFORM_MINGW32
+			if (io_scope >= 0)
+#endif
+				break;
 		}
 #endif
 		/* Fork off a child process if necessary. */
@@ -12495,18 +13014,74 @@ evalcommand(union node *cmd, int flags)
 		 */
 #if ENABLE_PLATFORM_MINGW32
 		if (!(flags & EV_EXIT) || may_have_traps IF_SUW32(|| delayexit)) {
-			/* No, forking off a child is necessary */
-			struct forkshell fs;
+			/* Start eligible commands without another evaluator.
+			 * The parent still handles jobs, waits, and traps. */
+			IF_SUW32(if (!delayexit))
+			{
+				char **envp;
+				intptr_t spawn_ret;
+				HANDLE proc;
+				int idx;
 
-			INTOFF;
-			memset(&fs, 0, sizeof(fs));
-			fs.fpid = FS_SHELLEXEC;
-			fs.argv = argv;
-			fs.path = (char*)path;
-			fs.fd[0] = cmdentry.u.index;
-			jp = makejob(/*cmd,*/ 1);
-			spawn_forkshell(&fs, jp, cmd, FORK_FG);
-			break;
+				INTOFF;
+				/* The shell's exports, assignments, and PATH
+				 * need not match the process environment. */
+				envp = listvars(VEXPORT, VUNSET, varlist.list,
+						/*end:*/ NULL);
+				jp = makejob(/*cmd,*/ 1);
+				idx = cmdentry.u.index;
+				spawn_ret = mingw_spawn_shell_command(argv,
+						path, idx, envp);
+				if (spawn_ret == 0) {
+					freejob(jp);
+					jp = NULL;
+					exitstatus = 0;
+					INTON;
+					break;
+				}
+				if (spawn_ret != -1) {
+					HANDLE self = GetCurrentProcess();
+					BOOL duplicated;
+
+					duplicated = DuplicateHandle(
+							self,
+							(HANDLE)spawn_ret,
+							self, &proc, 0, TRUE,
+							DUPLICATE_SAME_ACCESS);
+					if (duplicated) {
+						forkparent(jp, cmd,
+							FORK_FG, proc);
+						break; /* wait below */
+					}
+					/* Never retry a started child. */
+					CloseHandle((HANDLE)spawn_ret);
+					freejob(jp);
+					jp = NULL;
+					INTON;
+					ash_msg_and_raise_error(
+						"cannot duplicate "
+						"process handle");
+				}
+				/* Spawn failed; fall through to forkshell. */
+				freejob(jp);
+				jp = NULL;
+				INTON;
+			}
+
+			/* Fallback: original forkshell-based path. */
+			{
+				struct forkshell fs;
+
+				INTOFF;
+				memset(&fs, 0, sizeof(fs));
+				fs.fpid = FS_SHELLEXEC;
+				fs.argv = argv;
+				fs.path = (char*)path;
+				fs.fd[0] = cmdentry.u.index;
+				jp = makejob(/*cmd,*/ 1);
+				spawn_forkshell(&fs, jp, cmd, FORK_FG);
+				break;
+			}
 		}
 #else
 		if (!(flags & EV_EXIT) || may_have_traps) {
@@ -17991,6 +18566,7 @@ forkshell_init(const char *idstr)
 	/* Set global variables */
 	ASSIGN_CONST_PTR(&ash_ptr_to_globals_misc, fs->gmp);
 	ASSIGN_CONST_PTR(&ash_ptr_to_globals_var, fs->gvp);
+	pending_trap = 0;
 	cmdtable = fs->cmdtable;
 #if ENABLE_ASH_ALIAS
 	atab = fs->atab;	/* will be NULL for FS_SHELLEXEC */

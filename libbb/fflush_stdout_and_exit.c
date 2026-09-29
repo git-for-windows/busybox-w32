@@ -13,9 +13,9 @@
  */
 void FAST_FUNC fflush_stdout_and_exit(int retval)
 {
-	if (fflush(stdout))
+	if (fflush(stdout) && !bb_nofork_signal)
 		bb_simple_perror_msg_and_die(bb_msg_standard_output);
-	xfunc_error_retval = retval;
+	xfunc_error_retval = bb_nofork_signal ? 128 + bb_nofork_signal : retval;
 	/* In case we are in NOFORK applet. Do not exit() directly,
 	 * but use xfunc_die() */
 	xfunc_die();

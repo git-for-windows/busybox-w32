@@ -10,14 +10,35 @@
  */
 #include "libbb.h"
 
+static struct line_cleanup {
+	char **buffer;
+	void (*next_die_func)(void);
+	struct line_cleanup *previous;
+} *line_cleanup;
+
+static void free_line_and_die(void)
+{
+	struct line_cleanup *saved = line_cleanup;
+
+	free(*saved->buffer);
+	line_cleanup = saved->previous;
+	die_func = saved->next_die_func;
+	if (die_func)
+		die_func();
+}
+
 char* FAST_FUNC bb_get_chunk_from_file(FILE *file, size_t *end)
 {
 	int ch;
 	size_t idx = 0;
 	char *linebuf = NULL;
+	struct line_cleanup saved = { &linebuf, die_func, line_cleanup };
+
+	line_cleanup = &saved;
+	die_func = free_line_and_die;
 
 #if ENABLE_PLATFORM_MINGW32
-	while ((ch = _getc_nolock(file)) != EOF) {
+	while (!bb_nofork_signal && (ch = _getc_nolock(file)) != EOF) {
 #else
 	while ((ch = getc(file)) != EOF) {
 #endif
@@ -32,6 +53,11 @@ char* FAST_FUNC bb_get_chunk_from_file(FILE *file, size_t *end)
 			break;
 		if (end && ch == '\n')
 			break;
+	}
+	if (bb_nofork_signal) {
+		free(linebuf);
+		linebuf = NULL;
+		idx = 0;
 	}
 	if (end)
 		*end = idx;
@@ -50,6 +76,8 @@ char* FAST_FUNC bb_get_chunk_from_file(FILE *file, size_t *end)
 			GetStdHandle(STD_INPUT_HANDLE) != INVALID_HANDLE_VALUE)
 		conToCharBuffA(linebuf, idx);
 #endif
+	die_func = saved.next_die_func;
+	line_cleanup = saved.previous;
 	return linebuf;
 }
 

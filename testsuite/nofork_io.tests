@@ -1,0 +1,109 @@
+# Sourced by sh.tests only with Windows ash and the required applets enabled.
+
+bindir=${bindir:-${BINDIR-}}
+nofork_cc=${CC:-}
+if test -z "$nofork_cc"; then
+	nofork_prefix=${CROSS_COMPILE-}
+	if test -z "$nofork_prefix"; then
+		nofork_prefix=$(sed -n \
+			's/^CONFIG_CROSS_COMPILER_PREFIX="\(.*\)"/\1/p' \
+			"$bindir/.config")
+	fi
+	nofork_cc=${nofork_prefix}gcc
+fi
+nofork_compiler=
+if command -v "$nofork_cc" >/dev/null 2>&1; then
+	case "$("$nofork_cc" -dumpmachine)" in
+	*-mingw32|*-windows-gnu) nofork_compiler=yes ;;
+	esac
+fi
+if test "$nofork_compiler" != yes; then
+	echo "SKIPPED: NOFORK Ctrl-C tests (usable MinGW compiler unavailable)"
+	return
+fi
+nofork_ready=
+if "$nofork_cc" -std=gnu99 -Wall -Wextra -Werror -municode \
+		./nofork_io.c -o nofork_io.exe; then
+	nofork_ready=yes
+fi
+testing "sh builds the isolated NOFORK Ctrl-C test helper" \
+	"printf '%s\n' '$nofork_ready'" "yes\n" "" ""
+if test "$nofork_ready" != yes; then
+	rm -f nofork_io.exe
+	return
+fi
+
+awk 'BEGIN { for (i = 0; i < 200000; i++) print "input line" }' >nofork-large
+echo "input line" >nofork-small
+cat >nofork-check.sh <<'EOF'
+trap 'echo trapped >&2' INT
+echo ready >&2
+EOF
+for direction in read write; do
+	for operation in 'cat' 'cat -v' 'cat -n' 'cat -b' \
+		'wc -l' 'head -n 1000000' 'head -c 10000000' \
+		'head -n -1' 'head -c -1' 'tr a A'; do
+		cp nofork-check.sh nofork-run.sh
+		fixture=nofork-large
+		if test "$direction/$operation" = "write/wc -l"; then
+			fixture=nofork-small
+			printf 'wc -l' >>nofork-run.sh
+			i=0
+			while test "$i" -lt 1024; do
+				printf ' "$1"' >>nofork-run.sh
+				i=$((i + 1))
+			done
+			echo >>nofork-run.sh
+		elif test "$direction" = write; then
+			printf '%s <"$1"\n' "$operation" >>nofork-run.sh
+		else
+			printf '%s\n' "$operation" >>nofork-run.sh
+		fi
+		cat >>nofork-run.sh <<'EOF'
+printf 'cancel-status=%s\n' "$?" >&2
+echo next-ready >&2
+wc -l >&2
+printf 'next-status=%s\n' "$?" >&2
+EOF
+		testing "sh interrupts NOFORK $operation $direction" \
+			"./nofork_io.exe \"\$bindir/busybox.exe\" \
+			nofork-run.sh $fixture nofork-result && \
+			cat nofork-result" \
+"ready=1 sent=1 received=1 resumed=1 next_blocked=1 exit=0
+ready
+trapped
+cancel-status=130
+next-ready
+1
+next-status=0
+" "" ""
+		rm -f nofork-result
+	done
+done
+cat >nofork-run.sh <<'EOF'
+echo ready >&2
+cat
+echo should-not-run >&2
+EOF
+testing "sh interrupts NOFORK input with the default SIGINT action" \
+	"./nofork_io.exe \"\$bindir/busybox.exe\" \
+	nofork-run.sh nofork-small nofork-result && cat nofork-result" \
+"ready=1 sent=1 received=1 resumed=1 next_blocked=0 exit=33554432
+ready
+" "" ""
+rm -f nofork-result
+cat >nofork-run.sh <<'EOF'
+trap '' INT
+echo ready >&2
+cat
+echo ignored-done >&2
+EOF
+testing "sh preserves an ignored SIGINT during NOFORK input" \
+	"./nofork_io.exe \"\$bindir/busybox.exe\" \
+	nofork-run.sh nofork-small nofork-result && cat nofork-result" \
+"ready=1 sent=1 received=1 resumed=0 next_blocked=0 exit=0
+ready
+ignored-done
+" "" ""
+rm -f nofork-result nofork-large nofork-small nofork-check.sh nofork-run.sh
+rm -f nofork_io.exe

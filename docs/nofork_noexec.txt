@@ -121,6 +121,24 @@ are probably not worth the effort.
 
 Applets which must be interruptible by ^C in shells can not be NOFORKs.
 
+Windows ash provides a limited exception for cat, wc, head and tr. It
+registers an I/O cancellation scope around those invocations and keeps
+asynchronous exceptions deferred until their normal cleanup has finished.
+The console handler cancels pending synchronous I/O; the applets and their
+I/O helpers observe bb_nofork_signal to stop starting or retrying I/O.
+They must not report incomplete input as a successful result or leave
+buffered input in the caller's stdin stream. If cancellation support is
+unavailable, ash launches a child instead.
+
+The scope includes cleanup and final output flushing. An interrupted
+command's output may be partial, but no buffered data may leak into a later
+command. An unexpected platform cancellation failure is reported; the
+command may then remain blocked until its I/O completes.
+
+This does not make arbitrary NOFORK applets interruptible. Opting in requires
+auditing normal, error and cancellation paths for owned streams and buffers.
+Do not jump out of a libc operation from the console-handler thread.
+
 Any NOFORK applet is also a NOEXEC applet.
 
 

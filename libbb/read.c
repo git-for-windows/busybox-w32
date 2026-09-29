@@ -13,6 +13,10 @@ ssize_t FAST_FUNC safe_read(int fd, void *buf, size_t count)
 	ssize_t n;
 
 	for (;;) {
+		if (bb_nofork_signal) {
+			errno = EINTR;
+			return -1;
+		}
 		n = read(fd, buf, count);
 		if (n >= 0 || errno != EINTR)
 			break;
